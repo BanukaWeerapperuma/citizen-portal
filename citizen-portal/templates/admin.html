@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard | Citizen Services Portal</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        /* Admin Specific Styles */
+        .admin-login-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: var(--primary-color);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+        .login-card {
+            background: white;
+            padding: 2.5rem;
+            border-radius: 12px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+        }
+        .dashboard-container {
+            display: grid;
+            grid-template-columns: 240px 1fr;
+            height: 100vh;
+        }
+        .admin-sidebar {
+            background: #1a1a1a;
+            color: white;
+            padding: 1.5rem;
+        }
+        .admin-sidebar h2 { font-size: 1.2rem; margin-bottom: 2rem; }
+        .admin-nav { list-style: none; }
+        .admin-nav li { 
+            padding: 0.75rem 1rem; 
+            margin-bottom: 0.5rem; 
+            border-radius: 6px; 
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .admin-nav li:hover, .admin-nav li.active { background: #333; }
+        
+        .admin-main { 
+            padding: 2rem; 
+            background: #f8f9fa; 
+            overflow-y: auto; 
+        }
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        .stat-box {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            box-shadow: var(--shadow);
+            border-bottom: 4px solid var(--accent-color);
+        }
+        .stat-box h4 { color: var(--text-light); font-size: 0.9rem; margin-bottom: 0.5rem; }
+        .stat-box .value { font-size: 1.8rem; font-weight: 700; color: var(--primary-color); }
+
+        .chart-container {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            box-shadow: var(--shadow);
+            margin-bottom: 2rem;
+        }
+
+        .table-container {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 10px;
+            box-shadow: var(--shadow);
+        }
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid #eee; font-size: 0.9rem; }
+        th { background: #fdfdfd; font-weight: 600; }
+        
+        .export-section { margin-top: 1rem; text-align: right; }
+        .logout-btn { margin-top: auto; color: #ff4d4d; cursor: pointer; padding: 10px; }
+    </style>
+</head>
+<body>
+    <!-- Login Overlay -->
+    <div id="login-overlay" class="admin-login-overlay">
+        <div class="login-card">
+            <h2 style="margin-bottom: 1.5rem; text-align: center;">Admin Login</h2>
+            <form id="admin-login-form">
+                <div class="form-group">
+                    <label>Username</label>
+                    <input type="text" id="admin-username" required>
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" id="admin-password" required>
+                </div>
+                <button type="submit" class="btn-primary">Login to Dashboard</button>
+                <p id="login-error" style="color: red; font-size: 0.85rem; margin-top: 10px;" class="hidden">Invalid username or password.</p>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main Dashboard -->
+    <div id="dashboard-content" class="dashboard-container hidden">
+        <aside class="admin-sidebar">
+            <h2>Admin Panel</h2>
+            <ul class="admin-nav">
+                <li class="active"><i class="fas fa-chart-line"></i> Dashboard</li>
+                <li id="export-btn-nav"><i class="fas fa-file-export"></i> Export Data</li>
+                <li id="logout-btn" class="logout-btn"><i class="fas fa-sign-out-alt"></i> Logout</li>
+            </ul>
+        </aside>
+
+        <main class="admin-main">
+            <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem;">
+                <h1>Dashboard Overview</h1>
+                <div class="user-info">Welcome, <span id="display-username">Admin</span></div>
+            </header>
+
+            <div class="stats-row">
+                <div class="stat-box">
+                    <h4>Total Engagements</h4>
+                    <div id="total-engagements" class="value">0</div>
+                </div>
+                <div class="stat-box">
+                    <h4>Active Surveys</h4>
+                    <div class="value">5</div>
+                </div>
+                <div class="stat-box">
+                    <h4>AI Queries Today</h4>
+                    <div class="value">124</div>
+                </div>
+            </div>
+
+            <div class="chart-container">
+                <h3>Interest Distribution</h3>
+                <canvas id="interestChart" height="100"></canvas>
+            </div>
+
+            <div class="table-container">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h3>Recent Activity</h3>
+                    <button id="refresh-btn" class="btn-secondary" style="padding: 5px 15px; font-size: 0.8rem;">Refresh</button>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Age</th>
+                            <th>Occupation</th>
+                            <th>Interest</th>
+                        </tr>
+                    </thead>
+                    <tbody id="activity-table-body">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+                <div class="export-section">
+                    <button id="export-csv-btn" class="btn-primary" style="width: auto; padding: 0.5rem 1.5rem;">
+                        <i class="fas fa-download"></i> Export to CSV
+                    </button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/admin.js"></script>
+</body>
+</html>

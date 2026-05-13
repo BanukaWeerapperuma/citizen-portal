@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Citizen Services Portal | Government of the People</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <header class="top-nav">
+        <div class="logo">
+            <i class="fas fa-landmark"></i>
+            <span>CitizenPortal</span>
+        </div>
+        
+        <div class="language-switcher">
+            <button class="lang-btn active" data-lang="en">English</button>
+            <button class="lang-btn" data-lang="si">සිංහල</button>
+            <button class="lang-btn" data-lang="ta">தமிழ்</button>
+        </div>
+
+        <div class="search-container">
+            <input type="text" id="ai-search" placeholder="Ask AI: 'How do I renew my passport?'">
+            <button id="search-btn"><i class="fas fa-paper-plane"></i> Ask Gemini</button>
+        </div>
+
+        <div class="header-right">
+            <div id="sl-clock" class="clock-display"></div>
+            <div class="user-status">
+                <button id="auth-btn" class="btn-secondary">Login</button>
+                <div id="user-display" class="hidden">
+                    <div class="profile-trigger" id="profile-trigger">
+                        <img src="https://ui-avatars.com/api/?name=User&background=random" id="profile-img" alt="Profile">
+                        <span id="username-span"></span>
+                    </div>
+                    <button id="logout-btn" class="btn-text">Logout</button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="main-layout">
+        <!-- Sidebar: Ministry List -->
+        <aside class="sidebar">
+            <h3><i class="fas fa-building"></i> <span data-i18n="ministries">Ministries</span></h3>
+            <ul id="ministry-list">
+                <li class="loading">Loading ministries...</li>
+            </ul>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="content">
+            <div id="welcome-screen">
+                <h2 data-i18n="welcome_title">Welcome to the Citizen Services Portal</h2>
+                <p data-i18n="welcome_desc">Select a ministry from the sidebar to view available services and common questions.</p>
+                <div class="quick-stats">
+                    <div class="stat-card">
+                        <span class="stat-value">20</span>
+                        <span class="stat-label" data-i18n="ministries">Ministries</span>
+                    </div>
+                    <div class="stat-card">
+                        <span class="stat-value">100+</span>
+                        <span class="stat-label" data-i18n="services">Services</span>
+                    </div>
+                </div>
+            </div>
+
+            <div id="ministry-details" class="hidden">
+                <h1 id="selected-ministry-name"></h1>
+                <p id="selected-ministry-desc"></p>
+                
+                <section class="services-section">
+                    <h3><i class="fas fa-concierge-bell"></i> <span data-i18n="available_services">Available Services</span></h3>
+                    <div id="services-list" class="grid-container"></div>
+                </section>
+
+                <section class="faq-section">
+                    <h3><i class="fas fa-question-circle"></i> <span data-i18n="faqs">Frequently Asked Questions</span></h3>
+                    <div id="faq-list"></div>
+                </section>
+            </div>
+            
+            <div id="ai-response-container" class="hidden">
+                <h3><i class="fas fa-robot"></i> <span data-i18n="ai_assistant">Gemini AI Assistant</span></h3>
+                <div id="ai-response-content"></div>
+                <button id="close-ai" class="btn-secondary" data-i18n="close">Close Assistant</button>
+            </div>
+        </main>
+
+        <!-- Right Panel -->
+        <aside class="engagement-panel">
+            <h3 data-i18n="citizen_engagement">Citizen Engagement</h3>
+            <p data-i18n="engagement_desc">Tell us more about yourself to personalize your experience.</p>
+            <form id="engagement-form">
+                <div class="form-group">
+                    <label data-i18n="age">Age</label>
+                    <input type="number" id="age" required>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="job">Occupation</label>
+                    <input type="text" id="job" required>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="interest">Primary Interest</label>
+                    <select id="interest" required>
+                        <option value="Healthcare" data-i18n="healthcare">Healthcare</option>
+                        <option value="Education" data-i18n="education">Education</option>
+                        <option value="Employment" data-i18n="employment">Employment</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn-primary" data-i18n="update_profile">Update Profile</button>
+            </form>
+        </aside>
+    </div>
+
+    <!-- Profile Modal -->
+    <div id="profile-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3><i class="fas fa-user-circle"></i> User Profile</h3>
+            <div class="profile-details">
+                <div class="profile-item">
+                    <label>Username:</label>
+                    <span id="profile-username"></span>
+                </div>
+                <div class="profile-item">
+                    <label>Account Type:</label>
+                    <span>Citizen</span>
+                </div>
+                <div class="profile-item">
+                    <label>Region:</label>
+                    <span>Sri Lanka (UTC+5:30)</span>
+                </div>
+            </div>
+            <button type="button" id="close-profile" class="btn-primary" style="margin-top: 20px;">Close Profile</button>
+        </div>
+    </div>
+
+    <!-- Auth Modal -->
+    <div id="auth-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="auth-tabs">
+                <button id="tab-login" class="active">Login</button>
+                <button id="tab-signup">Sign Up</button>
+            </div>
+            <form id="auth-form">
+                <div class="form-group">
+                    <label>Username</label>
+                    <input type="text" id="auth-username" required>
+                </div>
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" id="auth-password" required>
+                </div>
+                <button type="submit" class="btn-primary" id="auth-submit-btn">Login</button>
+                <button type="button" id="close-modal" class="btn-text">Cancel</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
