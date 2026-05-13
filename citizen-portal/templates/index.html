@@ -159,6 +159,27 @@
         </div>
     </div>
 
+    <!-- AI Chat Widget -->
+    <div id="ai-chat-widget" class="chat-widget">
+        <div id="chat-window" class="chat-window hidden">
+            <div class="chat-header">
+                <i class="fas fa-robot"></i> Gemini Assistant
+                <button id="close-chat"><i class="fas fa-times"></i></button>
+            </div>
+            <div id="chat-messages" class="chat-messages">
+                <!-- Messages go here -->
+            </div>
+            <div class="chat-input">
+                <input type="text" id="user-chat-input" placeholder="Type a message...">
+                <button id="send-chat"><i class="fas fa-paper-plane"></i></button>
+            </div>
+        </div>
+        <button id="chat-bubble" class="chat-bubble">
+            <i class="fas fa-comment-dots"></i>
+            <span class="chat-badge">AI</span>
+        </button>
+    </div>
+
     <script src="/static/script.js"></script>
 </body>
 </html>

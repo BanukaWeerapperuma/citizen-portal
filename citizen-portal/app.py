@@ -11,13 +11,21 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+import logging
+
+# Configure logging
+logging.basicConfig(
+    filename='app.log',
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s %(name)s %(threadName)s : %(message)s'
+)
+
 app = Flask(__name__)
 CORS(app)
 
-# 1. Initialize Google AI
-genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
-# Note: gemini-1.5-flash was requested, but gemini-3-flash-preview is used based on availability
-model = genai.GenerativeModel('gemini-3-flash-preview')
+@app.route('/api/ping')
+def ping():
+    return jsonify({"status": "alive", "time": datetime.now().isoformat()})
 
 # 2. Connect to MongoDB
 mongo_uri = os.getenv('MONGO_URI')
@@ -56,23 +64,26 @@ def setup_admin():
 # 4b. Translation API using Gemini
 @app.route('/api/translate', methods=['POST'])
 def translate_content():
-    data = request.json
-    content = data.get('content') # Can be string or dict
-    target_lang = data.get('target_lang') # 'si', 'ta', 'en'
+    data = request.json or {}
+    content = data.get('content')
+    target_lang = data.get('target_lang', 'en')
     
-    lang_names = {"si": "Sinhala", "ta": "Tamil", "en": "English"}
-    lang_name = lang_names.get(target_lang, "English")
-    
-    if target_lang == 'en':
+    if not content or target_lang == 'en':
         return jsonify({"translated": content})
-
-    prompt = f"Translate the following content into {lang_name}. If it's a list or object, translate only the values. Return only the translated content:\n\n{content}"
-    
+        
     try:
-        response = model.generate_content(prompt)
+        lang_name = "Sinhala" if target_lang == "si" else "Tamil"
+        prompt = f"Translate the following text to {lang_name}. Provide ONLY the translation: {content}"
+        
+        # Use verified stable model
+        t_model = genai.GenerativeModel('gemini-1.5-flash')
+        response = t_model.generate_content(prompt)
+        
         return jsonify({"translated": response.text.strip()})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        err_msg = str(e)
+        logging.error(f"Translation Error: {err_msg}")
+        return jsonify({"translated": content})
 
 # Run setup
 setup_admin()
@@ -93,7 +104,7 @@ def register():
     if users_col.find_one({"username": data['username']}):
         return jsonify({"error": "User already exists"}), 400
     users_col.insert_one(data)
-    return jsonify({"message": "User registered successfully"}), 201
+    return jsonify({"message": "User created"}), 201
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
@@ -128,37 +139,52 @@ def dashboard_stats():
 @admin_required
 def export_csv():
     engagements = list(engagement_col.find({}, {"_id": 0}))
-    if not engagements: return jsonify({"error": "No data"}), 404
-    si = io.StringIO()
-    cw = csv.DictWriter(si, fieldnames=engagements[0].keys())
-    cw.writeheader()
-    cw.writerows(engagements)
-    output = io.BytesIO()
-    output.write(si.getvalue().encode('utf-8'))
-    output.seek(0)
-    return send_file(output, mimetype='text/csv', as_attachment=True, download_name='engagements.csv')
+    return jsonify(engagements)
 
 # 8. Public API Routes
 @app.route('/api/services', methods=['GET'])
-def list_services():
-    services = list(services_col.find({}, {"_id": 0}))
-    return jsonify(services)
+def get_services():
+    return jsonify(list(services_col.find({}, {"_id": 0})))
 
 @app.route('/api/engagement', methods=['POST'])
-def log_engagement():
+def save_engagement():
     data = request.json
     engagement_col.insert_one(data)
     return jsonify({"message": "Success"}), 201
 
 @app.route('/api/ai/chat', methods=['POST'])
 def ai_chat():
-    data = request.json
+    data = request.json or {}
     prompt = data.get('prompt')
+    
+    if not prompt:
+        return jsonify({"error": "Prompt is required"}), 400
+        
     try:
-        response = model.generate_content(prompt)
-        return jsonify({"response": response.text, "model": model.model_name})
+        logging.info(f"AI Request: {prompt}")
+        genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
+        # Using 1.5-flash which is the standard for most free-tier users
+        chat_model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        full_prompt = f"You are the AI Assistant for the Sri Lankan Citizen Services Portal. Answer this citizen query politely: {prompt}"
+        response = chat_model.generate_content(full_prompt)
+        
+        if response and response.text:
+            return jsonify({
+                "response": response.text.strip(),
+                "model": "gemini-1.5-flash"
+            })
+        else:
+            return jsonify({"error": "Empty response from AI"}), 500
+            
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        err_msg = str(e)
+        logging.exception("AI CHAT ERROR")
+        
+        if "429" in err_msg or "quota" in err_msg.lower():
+            return jsonify({"error": "AI Quota Exceeded. Please try again in a few minutes or check your API billing."}), 429
+            
+        return jsonify({"error": f"AI Engine Error: {err_msg}"}), 500
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))

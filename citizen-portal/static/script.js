@@ -254,6 +254,96 @@ document.addEventListener('DOMContentLoaded', () => {
         alert('Data Saved!');
     });
 
+    // --- 6. AI Chat Widget Logic ---
+    const chatBubble = document.getElementById('chat-bubble');
+    const chatWindow = document.getElementById('chat-window');
+    const closeChat = document.getElementById('close-chat');
+    const sendChat = document.getElementById('send-chat');
+    const chatInput = document.getElementById('user-chat-input');
+    const chatMessages = document.getElementById('chat-messages');
+
+    let chatHistory = JSON.parse(localStorage.getItem('ai_chat_history') || '[]');
+
+    function renderMessages() {
+        chatMessages.innerHTML = '';
+        if (chatHistory.length === 0) {
+            addMessage('ai', 'Hello! I am your Sri Lankan Citizen Assistant. How can I help you today?');
+        } else {
+            chatHistory.forEach(msg => addMessageToUI(msg.role, msg.text));
+        }
+    }
+
+    function addMessage(role, text) {
+        chatHistory.push({ role, text });
+        localStorage.setItem('ai_chat_history', JSON.stringify(chatHistory));
+        addMessageToUI(role, text);
+    }
+
+    function addMessageToUI(role, text) {
+        const div = document.createElement('div');
+        div.className = `message ${role}`;
+        div.textContent = text;
+        chatMessages.appendChild(div);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    chatBubble.addEventListener('click', () => {
+        chatWindow.classList.toggle('hidden');
+        if (!chatWindow.classList.contains('hidden')) {
+            renderMessages();
+        }
+    });
+
+    closeChat.addEventListener('click', (e) => {
+        e.stopPropagation();
+        chatWindow.classList.add('hidden');
+    });
+
+    async function handleChat() {
+        const text = chatInput.value.trim();
+        if (!text) return;
+
+        addMessage('user', text);
+        chatInput.value = '';
+
+        const typingDiv = document.createElement('div');
+        typingDiv.className = 'message ai typing';
+        typingDiv.textContent = '...';
+        chatMessages.appendChild(typingDiv);
+
+        try {
+            const res = await fetch('/api/ai/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt: text })
+            });
+            const data = await res.json();
+            chatMessages.removeChild(typingDiv);
+            
+            if (data.response) {
+                addMessage('ai', data.response);
+            } else {
+                addMessage('ai', 'Sorry, I encountered an error. Please try again.');
+            }
+        } catch (error) {
+            chatMessages.removeChild(typingDiv);
+            addMessage('ai', 'Connection error. Please check your internet.');
+        }
+    }
+
+    sendChat.addEventListener('click', handleChat);
+    chatInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') handleChat();
+    });
+
+    // Auto-popup after 3 seconds if not already interacted
+    setTimeout(() => {
+        if (chatWindow.classList.contains('hidden') && chatHistory.length === 0) {
+            chatWindow.classList.remove('hidden');
+            renderMessages();
+        }
+    }, 3000);
+
     fetchMinistries();
     updateAuthUI();
 });
