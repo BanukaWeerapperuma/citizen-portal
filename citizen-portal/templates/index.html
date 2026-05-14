@@ -21,10 +21,6 @@
             <button class="lang-btn" data-lang="ta">தமிழ்</button>
         </div>
 
-        <div class="search-container">
-            <input type="text" id="ai-search" placeholder="Ask AI: 'How do I renew my passport?'">
-            <button id="search-btn"><i class="fas fa-paper-plane"></i> Ask Gemini</button>
-        </div>
 
         <div class="header-right">
             <div id="sl-clock" class="clock-display"></div>
@@ -82,11 +78,6 @@
                 </section>
             </div>
             
-            <div id="ai-response-container" class="hidden">
-                <h3><i class="fas fa-robot"></i> <span data-i18n="ai_assistant">Gemini AI Assistant</span></h3>
-                <div id="ai-response-content"></div>
-                <button id="close-ai" class="btn-secondary" data-i18n="close">Close Assistant</button>
-            </div>
         </main>
 
         <!-- Right Panel -->
@@ -159,27 +150,27 @@
         </div>
     </div>
 
-    <!-- AI Chat Widget -->
+
+    <script src="/static/script.js"></script>
+
+    <!-- AI Chat Bubble -->
     <div id="ai-chat-widget" class="chat-widget">
         <div id="chat-window" class="chat-window hidden">
             <div class="chat-header">
-                <i class="fas fa-robot"></i> Gemini Assistant
+                <i class="fas fa-robot"></i> Citizen Assistant
                 <button id="close-chat"><i class="fas fa-times"></i></button>
             </div>
             <div id="chat-messages" class="chat-messages">
-                <!-- Messages go here -->
+                <div class="message ai">Hello! I'm your AI Assistant. How can I help you today?</div>
             </div>
-            <div class="chat-input">
-                <input type="text" id="user-chat-input" placeholder="Type a message...">
+            <div class="chat-input-area">
+                <input type="text" id="user-chat-input" placeholder="Ask about services...">
                 <button id="send-chat"><i class="fas fa-paper-plane"></i></button>
             </div>
         </div>
         <button id="chat-bubble" class="chat-bubble">
             <i class="fas fa-comment-dots"></i>
-            <span class="chat-badge">AI</span>
         </button>
     </div>
-
-    <script src="/static/script.js"></script>
 </body>
 </html>

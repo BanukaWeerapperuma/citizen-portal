@@ -8,12 +8,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const ministryName = document.getElementById('selected-ministry-name');
     const ministryDesc = document.getElementById('selected-ministry-desc');
     
-    const aiSearchInput = document.getElementById('ai-search');
-    const searchBtn = document.getElementById('search-btn');
-    const aiContainer = document.getElementById('ai-response-container');
-    const aiContent = document.getElementById('ai-response-content');
-    const closeAiBtn = document.getElementById('close-ai');
     
+
     const engagementForm = document.getElementById('engagement-form');
     const authBtn = document.getElementById('auth-btn');
     const authModal = document.getElementById('auth-modal');
@@ -84,19 +80,13 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function translateDynamic(content) {
-        if (currentLang === 'en') return content;
-        try {
-            const response = await fetch('/api/translate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content, target_lang: currentLang })
-            });
-            const data = await response.json();
-            return data.translated;
-        } catch (error) {
-            console.error('Translation error:', error);
-            return content;
+        if (typeof content === 'string') return content;
+        if (content && content[currentLang]) {
+            return content[currentLang];
+        } else if (content && content['en']) {
+            return content['en'];
         }
+        return "Not available";
     }
 
     // --- 3. Data Loading ---
@@ -125,24 +115,74 @@ document.addEventListener('DOMContentLoaded', () => {
         welcomeScreen.classList.add('hidden');
         ministryDetails.classList.remove('hidden');
         ministryName.textContent = await translateDynamic(m.name);
-        ministryDesc.textContent = await translateDynamic(m.description);
+        // User data might not have top-level description, check for it
+        ministryDesc.textContent = m.description ? await translateDynamic(m.description) : "";
+        
+        // Add Contact and Links section
+        let infoHtml = '';
+        if (m.contact) {
+            infoHtml += `
+                <div class="contact-info-box">
+                    <h4><i class="fas fa-address-book"></i> Contact Information</h4>
+                    <p><strong>Phone:</strong> ${m.contact.phone || 'N/A'}</p>
+                    <p><strong>Email:</strong> ${m.contact.email || 'N/A'}</p>
+                </div>
+            `;
+        }
+        
+        if (m.links && m.links.length > 0) {
+            infoHtml += `<div class="useful-links-box"><h4><i class="fas fa-external-link-alt"></i> Useful Links</h4><div class="links-grid">`;
+            for (const link of m.links) {
+                const linkTitle = await translateDynamic(link.title);
+                infoHtml += `<button class="btn-link" onclick="window.open('${link.url}', '_blank')">${linkTitle}</button>`;
+            }
+            infoHtml += `</div></div>`;
+        }
+        
+        // Create a container for info if it doesn't exist or just prepend it
+        let infoContainer = document.getElementById('ministry-info-extra');
+        if (!infoContainer) {
+            infoContainer = document.createElement('div');
+            infoContainer.id = 'ministry-info-extra';
+            ministryDesc.after(infoContainer);
+        }
+        infoContainer.innerHTML = infoHtml;
+
         servicesGrid.innerHTML = '';
-        for (const s of m.services) {
+        faqList.innerHTML = ''; // Clear FAQs initially
+        
+        const subservices = m.subservices || [];
+        for (const s of subservices) {
             const btn = document.createElement('button');
             btn.className = 'service-btn';
-            
-            // s is now an object {name, url}
             const translatedName = await translateDynamic(s.name);
             btn.innerHTML = `<i class="fas fa-external-link-alt"></i> ${translatedName}`;
             
-            btn.onclick = () => window.open(s.url, '_blank');
+            btn.onclick = () => {
+                const url = (m.links && m.links[0]) ? m.links[0].url : 'https://www.gov.lk';
+                window.open(url, '_blank');
+            };
             servicesGrid.appendChild(btn);
         }
+        
+        // No auto-select needed for external links
+    }
+
+    async function renderSubserviceQuestions(s) {
         faqList.innerHTML = '';
-        for (const f of m.faqs) {
+        const questions = s.questions || [];
+        for (const f of questions) {
             const div = document.createElement('div');
             div.className = 'faq-item';
-            div.innerHTML = `<h4>${await translateDynamic(f.q)}</h4><p>${await translateDynamic(f.a)}</p>`;
+            
+            const q = await translateDynamic(f.q);
+            const a = await translateDynamic(f.answer);
+            
+            let extraInfo = '';
+            if (f.instructions) extraInfo += `<p class="instructions"><strong>Instructions:</strong> ${f.instructions}</p>`;
+            if (f.location) extraInfo += `<p class="location"><a href="${f.location}" target="_blank"><i class="fas fa-map-marker-alt"></i> Location Map</a></p>`;
+            
+            div.innerHTML = `<h4>${q}</h4><p>${a}</p>${extraInfo}`;
             faqList.appendChild(div);
         }
     }
@@ -223,20 +263,7 @@ document.addEventListener('DOMContentLoaded', () => {
         updateAuthUI();
     });
 
-    // --- 5. Search & Engagement ---
-    searchBtn.addEventListener('click', async () => {
-        const prompt = aiSearchInput.value;
-        if (!prompt) return;
-        aiContainer.classList.remove('hidden');
-        aiContent.textContent = "Asking Gemini...";
-        const res = await fetch('/api/ai/chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: `Translate this query to English first if it is in Sinhala or Tamil, then answer it: ${prompt}` })
-        });
-        const data = await res.json();
-        aiContent.textContent = data.response;
-    });
+    // --- 5. Engagement ---
 
     engagementForm.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -254,7 +281,9 @@ document.addEventListener('DOMContentLoaded', () => {
         alert('Data Saved!');
     });
 
-    // --- 6. AI Chat Widget Logic ---
+    
+
+    // --- AI Chat Bubble Logic ---
     const chatBubble = document.getElementById('chat-bubble');
     const chatWindow = document.getElementById('chat-window');
     const closeChat = document.getElementById('close-chat');
@@ -262,87 +291,64 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatInput = document.getElementById('user-chat-input');
     const chatMessages = document.getElementById('chat-messages');
 
-    let chatHistory = JSON.parse(localStorage.getItem('ai_chat_history') || '[]');
-
-    function renderMessages() {
-        chatMessages.innerHTML = '';
-        if (chatHistory.length === 0) {
-            addMessage('ai', 'Hello! I am your Sri Lankan Citizen Assistant. How can I help you today?');
-        } else {
-            chatHistory.forEach(msg => addMessageToUI(msg.role, msg.text));
-        }
-    }
-
-    function addMessage(role, text) {
-        chatHistory.push({ role, text });
-        localStorage.setItem('ai_chat_history', JSON.stringify(chatHistory));
-        addMessageToUI(role, text);
-    }
-
-    function addMessageToUI(role, text) {
-        const div = document.createElement('div');
-        div.className = `message ${role}`;
-        div.textContent = text;
-        chatMessages.appendChild(div);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-    }
-
     chatBubble.addEventListener('click', () => {
         chatWindow.classList.toggle('hidden');
-        if (!chatWindow.classList.contains('hidden')) {
-            renderMessages();
-        }
     });
 
-    closeChat.addEventListener('click', (e) => {
-        e.stopPropagation();
+    closeChat.addEventListener('click', () => {
         chatWindow.classList.add('hidden');
     });
 
     async function handleChat() {
-        const text = chatInput.value.trim();
-        if (!text) return;
+        const prompt = chatInput.value.trim();
+        if (!prompt) return;
 
-        addMessage('user', text);
+        // Display user message
+        addMessage('user', prompt);
         chatInput.value = '';
 
-        const typingDiv = document.createElement('div');
-        typingDiv.className = 'message ai typing';
-        typingDiv.textContent = '...';
-        chatMessages.appendChild(typingDiv);
+        // Typing indicator
+        const typingId = addMessage('ai typing', 'Typing...');
 
         try {
             const res = await fetch('/api/ai/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: text })
+                body: JSON.stringify({ prompt })
             });
             const data = await res.json();
-            chatMessages.removeChild(typingDiv);
             
+            // Remove typing indicator
+            const typingEl = document.getElementById(typingId);
+            if (typingEl) typingEl.remove();
+
             if (data.response) {
                 addMessage('ai', data.response);
             } else {
-                addMessage('ai', 'Sorry, I encountered an error. Please try again.');
+                addMessage('ai', "Sorry, I'm having trouble connecting right now.");
             }
         } catch (error) {
-            chatMessages.removeChild(typingDiv);
-            addMessage('ai', 'Connection error. Please check your internet.');
+            const typingEl = document.getElementById(typingId);
+            if (typingEl) typingEl.remove();
+            addMessage('ai', "Error: Could not reach the server.");
         }
+    }
+
+    function addMessage(role, text) {
+        const div = document.createElement('div');
+        const id = 'msg-' + Date.now();
+        div.id = id;
+        div.className = `message ${role}`;
+        div.textContent = text;
+        chatMessages.appendChild(div);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        return id;
     }
 
     sendChat.addEventListener('click', handleChat);
     chatInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter') handleChat();
     });
-
-    // Auto-popup after 3 seconds if not already interacted
-    setTimeout(() => {
-        if (chatWindow.classList.contains('hidden') && chatHistory.length === 0) {
-            chatWindow.classList.remove('hidden');
-            renderMessages();
-        }
-    }, 3000);
 
     fetchMinistries();
     updateAuthUI();

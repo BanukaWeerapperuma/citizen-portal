@@ -7,6 +7,7 @@ from pymongo import MongoClient
 import google.generativeai as genai
 from functools import wraps
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -61,29 +62,7 @@ def setup_admin():
     )
     print(f"Admin user '{admin_user}' verified/created with password '{admin_pwd}'.")
 
-# 4b. Translation API using Gemini
-@app.route('/api/translate', methods=['POST'])
-def translate_content():
-    data = request.json or {}
-    content = data.get('content')
-    target_lang = data.get('target_lang', 'en')
-    
-    if not content or target_lang == 'en':
-        return jsonify({"translated": content})
-        
-    try:
-        lang_name = "Sinhala" if target_lang == "si" else "Tamil"
-        prompt = f"Translate the following text to {lang_name}. Provide ONLY the translation: {content}"
-        
-        # Use verified stable model
-        t_model = genai.GenerativeModel('gemini-1.5-flash')
-        response = t_model.generate_content(prompt)
-        
-        return jsonify({"translated": response.text.strip()})
-    except Exception as e:
-        err_msg = str(e)
-        logging.error(f"Translation Error: {err_msg}")
-        return jsonify({"translated": content})
+# 4b. No Translation API needed here.
 
 # Run setup
 setup_admin()
@@ -152,40 +131,83 @@ def save_engagement():
     engagement_col.insert_one(data)
     return jsonify({"message": "Success"}), 201
 
+# AI Chat Removed
+
+# AI Chat Implementation
 @app.route('/api/ai/chat', methods=['POST'])
 def ai_chat():
     data = request.json or {}
     prompt = data.get('prompt')
-    
     if not prompt:
         return jsonify({"error": "Prompt is required"}), 400
         
     try:
-        logging.info(f"AI Request: {prompt}")
         genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
-        # Using 1.5-flash which is the standard for most free-tier users
-        chat_model = genai.GenerativeModel('gemini-1.5-flash')
         
-        full_prompt = f"You are the AI Assistant for the Sri Lankan Citizen Services Portal. Answer this citizen query politely: {prompt}"
-        response = chat_model.generate_content(full_prompt)
+        # Use gemini-flash-latest as a stable alias
+        model_name = 'gemini-flash-latest'
         
-        if response and response.text:
-            return jsonify({
-                "response": response.text.strip(),
-                "model": "gemini-1.5-flash"
-            })
-        else:
-            return jsonify({"error": "Empty response from AI"}), 500
-            
+        # Retry logic for 429 errors
+        import time
+        for attempt in range(2):
+            try:
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction="You are the official Sri Lanka Citizen Assistant. Answer questions based on the provided ministry data. Be polite and concise. Always prefer the data provided in your training if it matches Sri Lankan government services."
+                )
+                response = model.generate_content(prompt)
+                return jsonify({"response": response.text.strip()})
+            except Exception as e:
+                if "429" in str(e) and attempt == 0:
+                    time.sleep(2) # Wait and retry once
+                    continue
+                logging.warning(f"AI Attempt {attempt+1} failed: {str(e)}")
+                return local_ai_fallback(prompt)
+
     except Exception as e:
-        err_msg = str(e)
-        logging.exception("AI CHAT ERROR")
-        
-        if "429" in err_msg or "quota" in err_msg.lower():
-            return jsonify({"error": "AI Quota Exceeded. Please try again in a few minutes or check your API billing."}), 429
+        logging.error(f"AI CHAT CRITICAL ERROR: {str(e)}")
+        return local_ai_fallback(prompt)
+
+def local_ai_fallback(prompt):
+    """Fallback logic when Gemini API is unavailable"""
+    prompt_lower = prompt.lower()
+    all_services = list(services_col.find({}))
+    
+    # 1. Smarter Keyword Search
+    best_match = None
+    max_matches = 0
+    
+    keywords = prompt_lower.split()
+    for m in all_services:
+        matches = 0
+        m_name = m['name']['en'].lower()
+        if any(word in m_name for word in keywords if len(word) > 3):
+            matches += 2
             
-        return jsonify({"error": f"AI Engine Error: {err_msg}"}), 500
+        for s in m.get('subservices', []):
+            s_name = s['name']['en'].lower()
+            if any(word in s_name for word in keywords if len(word) > 3):
+                matches += 1
+                
+            for q in s.get('questions', []):
+                q_text = q['q']['en'].lower()
+                if any(word in q_text for word in keywords if len(word) > 4):
+                    return jsonify({"response": f"[Instant Answer] {q['answer']['en']} (Source: {m['name']['en']})"})
+
+        if matches > max_matches:
+            max_matches = matches
+            best_match = m
+
+    if best_match:
+        return jsonify({
+            "response": f"I've found information related to {best_match['name']['en']}. You can contact them at {best_match['contact']['phone']} or visit {best_match['links'][0]['url']} for official services."
+        })
+            
+    return jsonify({
+        "response": "I'm currently receiving many requests. While my AI is cooling down, please use keywords like 'passport', 'license', 'health', or 'tax' so I can find local answers for you!"
+    })
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    # Disable reloader on Windows to prevent [WinError 10038]
+    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)

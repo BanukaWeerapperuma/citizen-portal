@@ -4,4 +4,3 @@ pymongo[srv]==4.4.1
 dnspython==2.4.2
 python-dotenv==1.0.1
 google-generativeai
-pinecone-client
