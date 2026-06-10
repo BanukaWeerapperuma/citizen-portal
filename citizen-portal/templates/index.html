@@ -3,174 +3,299 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Citizen Services Portal | Government of the People</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <meta name="description" content="Sri Lanka Citizen Services Portal – access government services, ministry information, and AI-powered assistance in English, Sinhala, and Tamil.">
+    <title>Citizen Services Portal</title>
+
+    <!-- External Fonts & Icons -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Application Stylesheet -->
+    <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <header class="top-nav">
+
+    <!-- ============================================================
+         TOP NAVIGATION BAR
+    ============================================================ -->
+    <header class="top-nav" role="banner">
         <div class="logo">
-            <i class="fas fa-landmark"></i>
-            <span>CitizenPortal</span>
-        </div>
-        
-        <div class="language-switcher">
-            <button class="lang-btn active" data-lang="en">English</button>
-            <button class="lang-btn" data-lang="si">සිංහල</button>
-            <button class="lang-btn" data-lang="ta">தமிழ்</button>
+            <i class="fas fa-landmark" aria-hidden="true"></i>
+            <span>Citizen Portal</span>
         </div>
 
-
-        <div class="header-right">
-            <div id="sl-clock" class="clock-display"></div>
-            <div class="user-status">
-                <button id="auth-btn" class="btn-secondary">Login</button>
-                <div id="user-display" class="hidden">
-                    <div class="profile-trigger" id="profile-trigger">
-                        <img src="https://ui-avatars.com/api/?name=User&background=random" id="profile-img" alt="Profile">
-                        <span id="username-span"></span>
-                    </div>
-                    <button id="logout-btn" class="btn-text">Logout</button>
-                </div>
-            </div>
-        </div>
+        <nav class="header-actions" aria-label="Site actions">
+            <button class="btn-secondary" id="open-profile-modal-btn" onclick="document.getElementById('profile-modal').style.display='flex'" aria-label="Open profile setup">
+                <i class="fas fa-user-circle" aria-hidden="true"></i> My Profile
+            </button>
+        </nav>
     </header>
 
-    <div class="main-layout">
-        <!-- Sidebar: Ministry List -->
-        <aside class="sidebar">
-            <h3><i class="fas fa-building"></i> <span data-i18n="ministries">Ministries</span></h3>
-            <ul id="ministry-list">
-                <li class="loading">Loading ministries...</li>
-            </ul>
+    <!-- ============================================================
+         MAIN THREE-COLUMN DASHBOARD LAYOUT
+    ============================================================ -->
+    <div class="main-layout" role="main">
+
+        <!-- ─────────────────────────────────────────────────────────
+             COLUMN 1 · SIDEBAR
+        ───────────────────────────────────────────────────────── -->
+        <aside class="sidebar" aria-label="Categories and language options">
+
+            <!-- Category Navigation -->
+            <section class="sidebar-section" aria-labelledby="cat-heading">
+                <h2 id="cat-heading">
+                    <i class="fas fa-th-large" aria-hidden="true"></i> Categories
+                </h2>
+                <div id="category-list" role="list" aria-label="Service categories">
+                    <!-- JS-injected category links populate here -->
+                </div>
+            </section>
+
+            <!-- Language Switcher -->
+            <div class="lang-switch" role="group" aria-label="Language selection">
+                <button id="lang-en" class="lang-btn active" onclick="setLang('en')" aria-pressed="true">
+                    English
+                </button>
+                <button id="lang-si" class="lang-btn" onclick="setLang('si')" aria-pressed="false">
+                    සිංහල
+                </button>
+                <button id="lang-ta" class="lang-btn" onclick="setLang('ta')" aria-pressed="false">
+                    தமிழ்
+                </button>
+            </div>
+
+            <!-- Announcements / Ads Area -->
+            <div class="ads" id="ads-area" aria-label="Announcements and programs" role="complementary">
+                <!-- Active informational campaigns injected by JS -->
+            </div>
+
         </aside>
 
-        <!-- Main Content -->
-        <main class="content">
-            <div id="welcome-screen">
-                <h2 data-i18n="welcome_title">Welcome to the Citizen Services Portal</h2>
-                <p data-i18n="welcome_desc">Select a ministry from the sidebar to view available services and common questions.</p>
-                <div class="quick-stats">
-                    <div class="stat-card">
-                        <span class="stat-value">20</span>
-                        <span class="stat-label" data-i18n="ministries">Ministries</span>
-                    </div>
-                    <div class="stat-card">
-                        <span class="stat-value">100+</span>
-                        <span class="stat-label" data-i18n="services">Services</span>
-                    </div>
-                </div>
+        <!-- ─────────────────────────────────────────────────────────
+             COLUMN 2 · INTERMEDIATE SUBSERVICE SECTION
+        ───────────────────────────────────────────────────────── -->
+        <section class="middle" aria-labelledby="sub-title">
+
+            <h2 id="sub-title">Select Subservice</h2>
+
+            <ul id="sub-list" role="list" aria-label="Subservice list">
+                <!-- Populated by JS when a category is selected -->
+            </ul>
+
+        </section>
+
+        <!-- ─────────────────────────────────────────────────────────
+             COLUMN 3 · PRIMARY CONTENT WORKSPACE
+        ───────────────────────────────────────────────────────── -->
+        <main class="content" aria-label="Service questions and answers">
+
+            <!-- Search Row -->
+            <div class="search-row" role="search">
+                <input
+                    type="text"
+                    id="search-input"
+                    placeholder="Search services or ask a question..."
+                    autocomplete="off"
+                    aria-label="Search services or ask a question"
+                >
+                <button
+                    class="btn-primary ask-btn"
+                    id="ask-ai-btn"
+                    onclick="openChat()"
+                    aria-label="Open AI assistant"
+                >
+                    <i class="fas fa-robot" aria-hidden="true"></i> Ask (AI)
+                </button>
             </div>
 
-            <div id="ministry-details" class="hidden">
-                <h1 id="selected-ministry-name"></h1>
-                <p id="selected-ministry-desc"></p>
-                
-                <section class="services-section">
-                    <h3><i class="fas fa-concierge-bell"></i> <span data-i18n="available_services">Available Services</span></h3>
-                    <div id="services-list" class="grid-container"></div>
-                </section>
+            <!-- Question List -->
+            <section aria-labelledby="q-title">
+                <h2 id="q-title">Select Question</h2>
+                <ul id="question-list" role="list" aria-label="Available questions">
+                    <!-- Populated by JS when a subservice is selected -->
+                </ul>
+            </section>
 
-                <section class="faq-section">
-                    <h3><i class="fas fa-question-circle"></i> <span data-i18n="faqs">Frequently Asked Questions</span></h3>
-                    <div id="faq-list"></div>
-                </section>
+            <!-- Answer Display Box -->
+            <div id="answer-box" aria-live="polite" aria-label="Answer content">
+                <!-- Answer payloads, instructions, location links,
+                     and file download paths rendered here by JS -->
             </div>
-            
+
         </main>
 
-        <!-- Right Panel -->
-        <aside class="engagement-panel">
-            <h3 data-i18n="citizen_engagement">Citizen Engagement</h3>
-            <p data-i18n="engagement_desc">Tell us more about yourself to personalize your experience.</p>
-            <form id="engagement-form">
-                <div class="form-group">
-                    <label data-i18n="age">Age</label>
-                    <input type="number" id="age" required>
-                </div>
-                <div class="form-group">
-                    <label data-i18n="job">Occupation</label>
-                    <input type="text" id="job" required>
-                </div>
-                <div class="form-group">
-                    <label data-i18n="interest">Primary Interest</label>
-                    <select id="interest" required>
-                        <option value="Healthcare" data-i18n="healthcare">Healthcare</option>
-                        <option value="Education" data-i18n="education">Education</option>
-                        <option value="Employment" data-i18n="employment">Employment</option>
-                    </select>
-                </div>
-                <button type="submit" class="btn-primary" data-i18n="update_profile">Update Profile</button>
-            </form>
-        </aside>
-    </div>
+    </div><!-- /.main-layout -->
 
-    <!-- Profile Modal -->
-    <div id="profile-modal" class="modal hidden">
+
+    <!-- ============================================================
+         PROGRESSIVE PROFILE MODAL
+    ============================================================ -->
+    <div id="profile-modal" class="modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="profile-modal-heading">
         <div class="modal-content">
-            <h3><i class="fas fa-user-circle"></i> User Profile</h3>
-            <div class="profile-details">
-                <div class="profile-item">
-                    <label>Username:</label>
-                    <span id="profile-username"></span>
+
+            <button
+                class="modal-close-btn"
+                onclick="document.getElementById('profile-modal').style.display='none'"
+                aria-label="Close profile modal"
+            >×</button>
+
+            <h3 id="profile-modal-heading">
+                <i class="fas fa-user-circle" aria-hidden="true"></i> Tell us about you
+            </h3>
+
+            <!-- Step 1: Name & Age -->
+            <div id="profile-step-1" class="profile-step" style="display:block;">
+                <p class="step-indicator">Step 1 of 3</p>
+
+                <div class="form-group">
+                    <label for="p_name">Full Name</label>
+                    <input
+                        type="text"
+                        id="p_name"
+                        placeholder="Enter your name"
+                        autocomplete="name"
+                    >
                 </div>
-                <div class="profile-item">
-                    <label>Account Type:</label>
-                    <span>Citizen</span>
+
+                <div class="form-group">
+                    <label for="p_age">Age</label>
+                    <input
+                        type="number"
+                        id="p_age"
+                        placeholder="Your age"
+                        min="1"
+                        max="120"
+                        autocomplete="off"
+                    >
                 </div>
-                <div class="profile-item">
-                    <label>Region:</label>
-                    <span>Sri Lanka (UTC+5:30)</span>
+
+                <div class="step-actions">
+                    <button class="btn-primary" onclick="profileNext(1)">
+                        Next <i class="fas fa-arrow-right" aria-hidden="true"></i>
+                    </button>
                 </div>
             </div>
-            <button type="button" id="close-profile" class="btn-primary" style="margin-top: 20px;">Close Profile</button>
-        </div>
-    </div>
 
-    <!-- Auth Modal -->
-    <div id="auth-modal" class="modal hidden">
-        <div class="modal-content">
-            <div class="auth-tabs">
-                <button id="tab-login" class="active">Login</button>
-                <button id="tab-signup">Sign Up</button>
+            <!-- Step 2: Email & Mobile -->
+            <div id="profile-step-2" class="profile-step" style="display:none;">
+                <p class="step-indicator">Step 2 of 3</p>
+
+                <div class="form-group">
+                    <label for="p_email">Email Address</label>
+                    <input
+                        type="email"
+                        id="p_email"
+                        placeholder="your@email.com"
+                        autocomplete="email"
+                    >
+                </div>
+
+                <div class="form-group">
+                    <label for="p_phone">Mobile Number</label>
+                    <input
+                        type="tel"
+                        id="p_phone"
+                        placeholder="+94 7X XXX XXXX"
+                        autocomplete="tel"
+                    >
+                </div>
+
+                <div class="step-actions">
+                    <button class="btn-secondary" onclick="profileBack(2)">
+                        <i class="fas fa-arrow-left" aria-hidden="true"></i> Back
+                    </button>
+                    <button class="btn-primary" onclick="profileNext(2)">
+                        Next <i class="fas fa-arrow-right" aria-hidden="true"></i>
+                    </button>
+                </div>
             </div>
-            <form id="auth-form">
+
+            <!-- Step 3: Job / Workplace -->
+            <div id="profile-step-3" class="profile-step" style="display:none;">
+                <p class="step-indicator">Step 3 of 3</p>
+
                 <div class="form-group">
-                    <label>Username</label>
-                    <input type="text" id="auth-username" required>
+                    <label for="p_job">Job Role / Workplace</label>
+                    <input
+                        type="text"
+                        id="p_job"
+                        placeholder="e.g. Teacher, Engineer, Self-employed..."
+                        autocomplete="organization-title"
+                    >
                 </div>
-                <div class="form-group">
-                    <label>Password</label>
-                    <input type="password" id="auth-password" required>
+
+                <div class="step-actions">
+                    <button class="btn-secondary" onclick="profileBack(3)">
+                        <i class="fas fa-arrow-left" aria-hidden="true"></i> Back
+                    </button>
+                    <button class="btn-primary" onclick="profileSubmit()">
+                        <i class="fas fa-check" aria-hidden="true"></i> Submit
+                    </button>
                 </div>
-                <button type="submit" class="btn-primary" id="auth-submit-btn">Login</button>
-                <button type="button" id="close-modal" class="btn-text">Cancel</button>
-            </form>
+            </div>
+
+        </div><!-- /.modal-content -->
+    </div><!-- /#profile-modal -->
+
+
+    <!-- ============================================================
+         AI ASSISTANT CHAT PANEL
+    ============================================================ -->
+    <aside class="chat-panel" id="chat-panel" aria-label="AI Assistant" aria-hidden="true">
+
+        <!-- Panel Header -->
+        <div class="chat-header">
+            <h3>
+                <i class="fas fa-robot" aria-hidden="true"></i> AI Assistant
+            </h3>
+            <button
+                class="chat-close-btn"
+                onclick="closeChat()"
+                aria-label="Close AI assistant"
+            >×</button>
         </div>
-    </div>
+
+        <!-- Message Log -->
+        <div class="chat-body" id="chat-body" role="log" aria-live="polite" aria-label="Conversation history">
+            <div class="chat-msg ai">
+                <i class="fas fa-robot" aria-hidden="true"></i>
+                Hello! I can help you find government services and answer your questions. What would you like to know?
+            </div>
+        </div>
+
+        <!-- Input Area -->
+        <div class="chat-input-area">
+            <div class="input-row">
+                <input
+                    type="text"
+                    id="chat-text"
+                    placeholder="Ask a question..."
+                    autocomplete="off"
+                    oninput="autosuggest(this.value)"
+                    onkeydown="if(event.key==='Enter') sendChat()"
+                    aria-label="Type your message"
+                >
+                <button
+                    class="btn-primary send-btn"
+                    onclick="sendChat()"
+                    aria-label="Send message"
+                >
+                    <i class="fas fa-paper-plane" aria-hidden="true"></i> Send
+                </button>
+            </div>
+
+            <!-- Typeahead Suggestions Box -->
+            <div id="suggestions" class="suggestions" role="listbox" aria-label="Search suggestions">
+                <!-- Populated by autosuggest() -->
+            </div>
+        </div>
+
+    </aside><!-- /#chat-panel -->
 
 
+    <!-- Application Script Bundle -->
     <script src="/static/script.js"></script>
 
-    <!-- AI Chat Bubble -->
-    <div id="ai-chat-widget" class="chat-widget">
-        <div id="chat-window" class="chat-window hidden">
-            <div class="chat-header">
-                <i class="fas fa-robot"></i> Citizen Assistant
-                <button id="close-chat"><i class="fas fa-times"></i></button>
-            </div>
-            <div id="chat-messages" class="chat-messages">
-                <div class="message ai">Hello! I'm your AI Assistant. How can I help you today?</div>
-            </div>
-            <div class="chat-input-area">
-                <input type="text" id="user-chat-input" placeholder="Ask about services...">
-                <button id="send-chat"><i class="fas fa-paper-plane"></i></button>
-            </div>
-        </div>
-        <button id="chat-bubble" class="chat-bubble">
-            <i class="fas fa-comment-dots"></i>
-        </button>
-    </div>
 </body>
 </html>

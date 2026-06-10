@@ -1,355 +1,649 @@
-document.addEventListener('DOMContentLoaded', () => {
-    // Elements
-    const ministryList = document.getElementById('ministry-list');
-    const welcomeScreen = document.getElementById('welcome-screen');
-    const ministryDetails = document.getElementById('ministry-details');
-    const servicesGrid = document.getElementById('services-list');
-    const faqList = document.getElementById('faq-list');
-    const ministryName = document.getElementById('selected-ministry-name');
-    const ministryDesc = document.getElementById('selected-ministry-desc');
-    
-    
+/**
+ * Citizen Services Portal – script.js  (Task 07)
+ * ─────────────────────────────────────────────────
+ * Vanilla JS SPA controller:
+ *   • Multilingual rendering  (EN / SI / TA)
+ *   • Category → Subservice → Question drill-down
+ *   • AI chat panel + autosuggest typeahead
+ *   • Progressive profile modal (3 steps)
+ *   • Ad carousel in sidebar
+ */
 
-    const engagementForm = document.getElementById('engagement-form');
-    const authBtn = document.getElementById('auth-btn');
-    const authModal = document.getElementById('auth-modal');
-    const userDisplay = document.getElementById('user-display');
-    const usernameSpan = document.getElementById('username-span');
-    const logoutBtn = document.getElementById('logout-btn');
-    
-    // Clock
-    const clockEl = document.getElementById('sl-clock');
+// ═══════════════════════════════════════════════════════════════
+// 1. GLOBAL STATE
+// ═══════════════════════════════════════════════════════════════
 
-    // Profile Elements
-    const profileTrigger = document.getElementById('profile-trigger');
-    const profileModal = document.getElementById('profile-modal');
-    const profileUsername = document.getElementById('profile-username');
-    const closeProfileBtn = document.getElementById('close-profile');
-    
-    // Auth Modal Elements
-    const authForm = document.getElementById('auth-form');
-    const tabLogin = document.getElementById('tab-login');
-    const tabSignup = document.getElementById('tab-signup');
-    const authSubmitBtn = document.getElementById('auth-submit-btn');
-    const closeModal = document.getElementById('close-modal');
-    
-    let currentMode = 'login';
-    let currentLang = 'en';
-    let allMinistries = [];
-    let currentSelectedMinistry = null;
+let currentLang        = localStorage.getItem('lang') || 'en';
+let selectedCategoryId = null;
+let profileId          = localStorage.getItem('profileId') || null;
 
-    // --- 1. Clock Logic (Sri Lanka UTC+5:30) ---
-    function updateClock() {
-        const now = new Date();
-        const options = {
-            timeZone: 'Asia/Colombo',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: true
-        };
-        const slTime = new Intl.DateTimeFormat('en-US', options).format(now);
-        clockEl.textContent = `Sri Lanka: ${slTime}`;
-    }
-    setInterval(updateClock, 1000);
-    updateClock();
+// Local data caches
+let categories = [];
+let services   = [];
+let ads        = [];
 
-    // --- 2. Language Support ---
-    const i18n = {
-        en: { ministries: "Ministries", welcome_title: "Welcome to the Citizen Services Portal", welcome_desc: "Select a ministry from the sidebar to view available services and common questions.", services: "Services", available_services: "Available Services", faqs: "Frequently Asked Questions", ai_assistant: "Gemini AI Assistant", close: "Close Assistant", citizen_engagement: "Citizen Engagement", engagement_desc: "Tell us more about yourself to personalize your experience.", age: "Age", job: "Occupation", interest: "Primary Interest", update_profile: "Update Profile", healthcare: "Healthcare", education: "Education", employment: "Employment" },
-        si: { ministries: "අමාත්‍යාංශ", welcome_title: "පුරවැසි සේවා ද්වාරය වෙත සාදරයෙන් පිළිගනිමු", welcome_desc: "පවතින සේවාවන් සහ පොදු ප්‍රශ්න බැලීමට පැති තීරුවෙන් අමාත්‍යාංශයක් තෝරන්න.", services: "සේවා", available_services: "පවතින සේවාවන්", faqs: "නිතර අසන පැන", ai_assistant: "Gemini AI සහායකයා", close: "සහායකයා වසන්න", citizen_engagement: "පුරවැසි සම්බන්ධතාවය", engagement_desc: "ඔබේ අත්දැකීම් පුද්ගලීකරණය කිරීමට ඔබ ගැන අපට තව කියන්න.", age: "වයස", job: "රැකියාව", interest: "ප්‍රධාන උනන්දුව", update_profile: "පැතිකඩ යාවත්කාලීන කරන්න", healthcare: "සෞඛ්‍ය සේවය", education: "අධ්‍යාපනය", employment: "රැකියා" },
-        ta: { ministries: "அமைச்சகங்கள்", welcome_title: "குடிமக்கள் சேவை போர்ட்டலுக்கு வரவேற்கிறோம்", welcome_desc: "கிடைக்கக்கூடிய சேவைகள் மற்றும் பொதுவான கேள்விகளைக் காண பக்கப்பட்டியில் இருந்து ஒரு அமைச்சகத்தைத் தேர்ந்தெடுக்கவும்.", services: "சேவைகள்", available_services: "கிடைக்கக்கூடிய சேவைகள்", faqs: "அடிக்கடி கேட்கப்படும் கேள்விகள்", ai_assistant: "ஜெமினி AI உதவியாளர்", close: "உதவியாளரை மூடு", citizen_engagement: "குடிமக்கள் ஈடுபாடு", engagement_desc: "உங்கள் அனுபவத்தைத் தனிப்பயனாக்க உங்களைப் பற்றி மேலும் எங்களிடம் கூறுங்கள்.", age: "வயது", job: "தொழில்", interest: "முதன்மை ஆர்வம்", update_profile: "சுயவிவரத்தைப் புதுப்பிக்கவும்", healthcare: "சுகாதாரம்", education: "கல்வி", employment: "வேலைவாய்ப்பு" }
-    };
+// Pending action to resume after profile submission
+let _pendingAction = null;
 
-    document.querySelectorAll('.lang-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            currentLang = btn.dataset.lang;
-            document.querySelectorAll('.lang-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            updateUIStrings();
-            if (currentSelectedMinistry) renderMinistryDetails(currentSelectedMinistry);
-            renderMinistryList();
-        });
-    });
 
-    function updateUIStrings() {
-        document.querySelectorAll('[data-i18n]').forEach(el => {
-            const key = el.dataset.i18n;
-            el.textContent = i18n[currentLang][key] || el.textContent;
-        });
-    }
+// ═══════════════════════════════════════════════════════════════
+// 2. INITIALISATION
+// ═══════════════════════════════════════════════════════════════
 
-    async function translateDynamic(content) {
-        if (typeof content === 'string') return content;
-        if (content && content[currentLang]) {
-            return content[currentLang];
-        } else if (content && content['en']) {
-            return content['en'];
-        }
-        return "Not available";
-    }
+document.addEventListener('DOMContentLoaded', init);
 
-    // --- 3. Data Loading ---
-    async function fetchMinistries() {
-        const res = await fetch('/api/services');
-        allMinistries = await res.json();
-        renderMinistryList();
-    }
+async function init() {
+    try {
+        // Fetch services (= categories/ministries)
+        const svcRes = await fetch('/api/services');
+        if (!svcRes.ok) throw new Error('Failed to load services');
+        services = await svcRes.json();
 
-    async function renderMinistryList() {
-        ministryList.innerHTML = '';
-        for (const m of allMinistries) {
-            const li = document.createElement('li');
-            li.textContent = await translateDynamic(m.name);
-            li.addEventListener('click', () => {
-                currentSelectedMinistry = m;
-                renderMinistryDetails(m);
-                document.querySelectorAll('#ministry-list li').forEach(el => el.classList.remove('active'));
-                li.classList.add('active');
+        // Build category list from services (each top-level service IS a category)
+        categories = services;
+
+        renderCategories();
+        renderAds();
+        setLang(currentLang);          // Honour saved language
+        syncLangButtons();
+
+        // Wire search input on the main pane
+        const searchInput = document.getElementById('search-input');
+        if (searchInput) {
+            searchInput.addEventListener('input', e => {
+                autosuggest(e.target.value);
             });
-            ministryList.appendChild(li);
+            searchInput.addEventListener('keydown', e => {
+                if (e.key === 'Enter') openChat();
+            });
         }
+    } catch (err) {
+        console.error('[init]', err);
     }
+}
 
-    async function renderMinistryDetails(m) {
-        welcomeScreen.classList.add('hidden');
-        ministryDetails.classList.remove('hidden');
-        ministryName.textContent = await translateDynamic(m.name);
-        // User data might not have top-level description, check for it
-        ministryDesc.textContent = m.description ? await translateDynamic(m.description) : "";
-        
-        // Add Contact and Links section
-        let infoHtml = '';
-        if (m.contact) {
-            infoHtml += `
-                <div class="contact-info-box">
-                    <h4><i class="fas fa-address-book"></i> Contact Information</h4>
-                    <p><strong>Phone:</strong> ${m.contact.phone || 'N/A'}</p>
-                    <p><strong>Email:</strong> ${m.contact.email || 'N/A'}</p>
-                </div>
-            `;
-        }
-        
-        if (m.links && m.links.length > 0) {
-            infoHtml += `<div class="useful-links-box"><h4><i class="fas fa-external-link-alt"></i> Useful Links</h4><div class="links-grid">`;
-            for (const link of m.links) {
-                const linkTitle = await translateDynamic(link.title);
-                infoHtml += `<button class="btn-link" onclick="window.open('${link.url}', '_blank')">${linkTitle}</button>`;
-            }
-            infoHtml += `</div></div>`;
-        }
-        
-        // Create a container for info if it doesn't exist or just prepend it
-        let infoContainer = document.getElementById('ministry-info-extra');
-        if (!infoContainer) {
-            infoContainer = document.createElement('div');
-            infoContainer.id = 'ministry-info-extra';
-            ministryDesc.after(infoContainer);
-        }
-        infoContainer.innerHTML = infoHtml;
 
-        servicesGrid.innerHTML = '';
-        faqList.innerHTML = ''; // Clear FAQs initially
-        
-        const subservices = m.subservices || [];
-        for (const s of subservices) {
-            const btn = document.createElement('button');
-            btn.className = 'service-btn';
-            const translatedName = await translateDynamic(s.name);
-            btn.innerHTML = `<i class="fas fa-external-link-alt"></i> ${translatedName}`;
-            
-            btn.onclick = () => {
-                const url = (m.links && m.links[0]) ? m.links[0].url : 'https://www.gov.lk';
-                window.open(url, '_blank');
-            };
-            servicesGrid.appendChild(btn);
-        }
-        
-        // No auto-select needed for external links
-    }
+// ═══════════════════════════════════════════════════════════════
+// 2b. AD CAROUSEL
+// ═══════════════════════════════════════════════════════════════
 
-    async function renderSubserviceQuestions(s) {
-        faqList.innerHTML = '';
-        const questions = s.questions || [];
-        for (const f of questions) {
-            const div = document.createElement('div');
-            div.className = 'faq-item';
-            
-            const q = await translateDynamic(f.q);
-            const a = await translateDynamic(f.answer);
-            
-            let extraInfo = '';
-            if (f.instructions) extraInfo += `<p class="instructions"><strong>Instructions:</strong> ${f.instructions}</p>`;
-            if (f.location) extraInfo += `<p class="location"><a href="${f.location}" target="_blank"><i class="fas fa-map-marker-alt"></i> Location Map</a></p>`;
-            
-            div.innerHTML = `<h4>${q}</h4><p>${a}</p>${extraInfo}`;
-            faqList.appendChild(div);
-        }
-    }
+async function renderAds() {
+    const adsArea = document.getElementById('ads-area');
+    if (!adsArea) return;
 
-    // --- 4. Auth & Profile Logic ---
-    authBtn.addEventListener('click', () => authModal.classList.remove('hidden'));
-    closeModal.addEventListener('click', () => authModal.classList.add('hidden'));
-    
-    // Profile Modal
-    profileTrigger.addEventListener('click', () => {
-        const user = localStorage.getItem('user');
-        if (user) {
-            profileUsername.textContent = user;
-            profileModal.classList.remove('hidden');
-        }
-    });
-    closeProfileBtn.addEventListener('click', () => profileModal.classList.add('hidden'));
-
-    tabLogin.addEventListener('click', () => {
-        currentMode = 'login';
-        tabLogin.classList.add('active');
-        tabSignup.classList.remove('active');
-        authSubmitBtn.textContent = 'Login';
-    });
-
-    tabSignup.addEventListener('click', () => {
-        currentMode = 'signup';
-        tabSignup.classList.add('active');
-        tabLogin.classList.remove('active');
-        authSubmitBtn.textContent = 'Sign Up';
-    });
-
-    authForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const username = document.getElementById('auth-username').value;
-        const password = document.getElementById('auth-password').value;
-        const endpoint = currentMode === 'login' ? '/api/auth/login' : '/api/auth/register';
-
-        const res = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password })
+    try {
+        const res = await fetch('/api/admin/ads', {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('adminToken') || 'none'}` }
         });
 
         if (res.ok) {
-            const data = await res.json();
-            if (currentMode === 'login') {
-                localStorage.setItem('user', data.username);
-                alert('Login successful!');
-                updateAuthUI();
-                authModal.classList.add('hidden');
-            } else {
-                alert('Account created! Please login.');
-                tabLogin.click();
-            }
-        } else {
-            const errorData = await res.json();
-            alert(errorData.error || 'Authentication failed');
+            ads = await res.json();
+        }
+    } catch (_) {
+        // Ads are non-critical – fail silently
+    }
+
+    if (!ads.length) {
+        adsArea.innerHTML = `
+            <div class="ad-card">
+                <p>📢 Access government services quickly.<br>
+                   Use the <strong>AI Assistant</strong> to ask questions in your language.</p>
+            </div>`;
+        return;
+    }
+
+    // Cycle through ads every 5 s
+    let adIndex = 0;
+    function showAd() {
+        const ad = ads[adIndex % ads.length];
+        adIndex++;
+        const title  = getLocalized(ad.title)  || ad.title  || 'Announcement';
+        const body   = getLocalized(ad.body)   || ad.body   || '';
+        const imgSrc = ad.image || null;
+        const link   = ad.link  || null;
+
+        adsArea.innerHTML = `
+            <div class="ad-card">
+                ${imgSrc ? `<img src="${imgSrc}" alt="${title}" class="ad-img">` : ''}
+                <p class="ad-title">${title}</p>
+                ${body ? `<p class="ad-body">${body}</p>` : ''}
+                ${link ? `<a href="${link}" target="_blank" class="ad-link">Learn more →</a>` : ''}
+            </div>`;
+    }
+
+    showAd();
+    setInterval(showAd, 5000);
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// 3. MULTILINGUAL ENGINE
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Return the localised string from a multilingual object.
+ * Falls back: target lang → 'en' → raw string.
+ */
+function getLocalized(obj) {
+    if (!obj) return '';
+    if (typeof obj === 'string') return obj;
+    return obj[currentLang] || obj['en'] || Object.values(obj)[0] || '';
+}
+
+function setLang(lang) {
+    currentLang = lang;
+    localStorage.setItem('lang', lang);
+    syncLangButtons();
+
+    // Re-render visible content in new language
+    if (selectedCategoryId) {
+        renderSubservices();
+    }
+    renderCategories();
+}
+
+function syncLangButtons() {
+    document.querySelectorAll('.lang-btn').forEach(btn => {
+        const btnLang = btn.getAttribute('onclick')?.match(/setLang\('(\w+)'\)/)?.[1];
+        if (btnLang) {
+            btn.classList.toggle('active', btnLang === currentLang);
+            btn.setAttribute('aria-pressed', String(btnLang === currentLang));
         }
     });
+}
 
-    function updateAuthUI() {
-        const user = localStorage.getItem('user');
-        if (user) {
-            authBtn.classList.add('hidden');
-            userDisplay.classList.remove('hidden');
-            usernameSpan.textContent = user;
-            // Update profile image if needed
-            document.getElementById('profile-img').src = `https://ui-avatars.com/api/?name=${user}&background=random`;
-        } else {
-            authBtn.classList.remove('hidden');
-            userDisplay.classList.add('hidden');
+
+// ═══════════════════════════════════════════════════════════════
+// 4. CATEGORY → SUBSERVICE → QUESTION DRILL-DOWN
+// ═══════════════════════════════════════════════════════════════
+
+function renderCategories() {
+    const container = document.getElementById('category-list');
+    if (!container) return;
+    container.innerHTML = '';
+
+    categories.forEach(cat => {
+        const name = getLocalized(cat.name) || cat.id || 'Unknown';
+
+        const btn = document.createElement('button');
+        btn.className   = 'cat-btn' + (cat.id === selectedCategoryId ? ' active' : '');
+        btn.textContent = name;
+        btn.role        = 'listitem';
+        btn.setAttribute('aria-pressed', String(cat.id === selectedCategoryId));
+
+        btn.addEventListener('click', () => {
+            selectedCategoryId = cat.id;
+            renderCategories();      // Refresh active state
+            renderSubservices();
+        });
+
+        container.appendChild(btn);
+    });
+}
+
+function renderSubservices() {
+    const subList = document.getElementById('sub-list');
+    const subTitle = document.getElementById('sub-title');
+    if (!subList) return;
+    subList.innerHTML = '';
+
+    const service = services.find(s => s.id === selectedCategoryId);
+    if (!service) return;
+
+    const catName = getLocalized(service.name);
+    if (subTitle) subTitle.textContent = catName;
+
+    const subservices = service.subservices || [];
+    subservices.forEach(sub => {
+        const name = getLocalized(sub.name) || sub.id || 'Subservice';
+
+        const li = document.createElement('li');
+        li.className = 'sub-item';
+        li.innerHTML = `<i class="fas fa-chevron-right" aria-hidden="true"></i> ${name}`;
+        li.setAttribute('role', 'listitem');
+
+        li.addEventListener('click', () => {
+            document.querySelectorAll('.sub-item').forEach(el => el.classList.remove('active'));
+            li.classList.add('active');
+            renderQuestions(service.id, sub.id);
+        });
+
+        subList.appendChild(li);
+    });
+
+    // Clear question/answer pane when switching category
+    const qList  = document.getElementById('question-list');
+    const ansBox = document.getElementById('answer-box');
+    if (qList) qList.innerHTML = '';
+    if (ansBox) ansBox.innerHTML = '';
+    const qTitle = document.getElementById('q-title');
+    if (qTitle) qTitle.textContent = 'Select Question';
+}
+
+function renderQuestions(serviceId, subserviceId) {
+    const qList  = document.getElementById('question-list');
+    const qTitle = document.getElementById('q-title');
+    const ansBox = document.getElementById('answer-box');
+    if (!qList) return;
+    qList.innerHTML = '';
+    if (ansBox) ansBox.innerHTML = '';
+
+    const service    = services.find(s => s.id === serviceId);
+    if (!service) return;
+    const subservice = (service.subservices || []).find(s => s.id === subserviceId);
+    if (!subservice) return;
+
+    const subName = getLocalized(subservice.name);
+    if (qTitle) qTitle.textContent = subName;
+
+    const questions = subservice.questions || [];
+    questions.forEach((qObj, idx) => {
+        const qText = getLocalized(qObj.q) || `Question ${idx + 1}`;
+
+        const li = document.createElement('li');
+        li.className = 'q-item';
+        li.setAttribute('role', 'listitem');
+        li.innerHTML = `<span class="q-num">${idx + 1}</span> ${qText}`;
+
+        li.addEventListener('click', () => {
+            document.querySelectorAll('.q-item').forEach(el => el.classList.remove('active'));
+            li.classList.add('active');
+            showAnswer(qObj, service);
+            trackClick(serviceId, subserviceId, qText);
+        });
+
+        qList.appendChild(li);
+    });
+}
+
+function showAnswer(qObj, service) {
+    const ansBox = document.getElementById('answer-box');
+    if (!ansBox) return;
+
+    const answer       = getLocalized(qObj.answer)       || 'No information available.';
+    const instructions = getLocalized(qObj.instructions) || '';
+    const location     = qObj.location  || '';
+    const downloads    = qObj.downloads || [];
+    const contact      = service?.contact || {};
+    const links        = service?.links   || [];
+
+    let html = `
+        <div class="answer-card">
+            <div class="answer-text">
+                <i class="fas fa-info-circle" aria-hidden="true"></i>
+                <p>${answer}</p>
+            </div>`;
+
+    if (instructions) {
+        html += `
+            <div class="answer-instructions">
+                <h4><i class="fas fa-list-ol" aria-hidden="true"></i> Instructions</h4>
+                <p>${instructions}</p>
+            </div>`;
+    }
+
+    if (location) {
+        html += `
+            <a href="${location}" target="_blank" rel="noopener" class="answer-location"
+               onclick="triggerProfileCheck(this)">
+                <i class="fas fa-map-marker-alt" aria-hidden="true"></i> View Location Map
+            </a>`;
+    }
+
+    if (downloads.length) {
+        html += `<div class="answer-downloads"><h4><i class="fas fa-paperclip" aria-hidden="true"></i> Downloads</h4>`;
+        downloads.forEach(dl => {
+            const dlName = getLocalized(dl.name) || dl.url || 'Download';
+            html += `
+                <a href="${dl.url}" target="_blank" rel="noopener" class="dl-link"
+                   onclick="triggerProfileCheck(this)">
+                    <i class="fas fa-file-download" aria-hidden="true"></i> ${dlName}
+                </a>`;
+        });
+        html += `</div>`;
+    }
+
+    if (contact.phone || contact.email) {
+        html += `
+            <div class="answer-contact">
+                <h4><i class="fas fa-address-book" aria-hidden="true"></i> Contact</h4>
+                ${contact.phone ? `<p><i class="fas fa-phone"></i> ${contact.phone}</p>` : ''}
+                ${contact.email ? `<p><i class="fas fa-envelope"></i> ${contact.email}</p>` : ''}
+            </div>`;
+    }
+
+    if (links.length) {
+        const linkBtns = links.map(l => {
+            const lTitle = getLocalized(l.title) || l.url;
+            return `<a href="${l.url}" target="_blank" rel="noopener" class="btn-link">
+                        <i class="fas fa-external-link-alt" aria-hidden="true"></i> ${lTitle}
+                    </a>`;
+        }).join('');
+        html += `<div class="answer-links">${linkBtns}</div>`;
+    }
+
+    html += `</div>`;
+    ansBox.innerHTML = html;
+    ansBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function trackClick(serviceId, subserviceId, questionText) {
+    try {
+        await fetch('/api/analytics/click', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                user_id:          profileId || 'anonymous',
+                service:          serviceId,
+                subservice:       subserviceId,
+                question_clicked: questionText,
+                timestamp:        new Date().toISOString()
+            })
+        });
+    } catch (err) {
+        // Analytics errors must not break UX
+        console.warn('[trackClick]', err);
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// 5. REAL-TIME AUTOSUGGEST TYPEAHEAD
+// ═══════════════════════════════════════════════════════════════
+
+let _suggestDebounce = null;
+
+async function autosuggest(val) {
+    const box = document.getElementById('suggestions');
+    if (!box) return;
+
+    const query = (val || '').trim();
+    if (query.length < 3) {
+        box.innerHTML = '';
+        box.style.display = 'none';
+        return;
+    }
+
+    clearTimeout(_suggestDebounce);
+    _suggestDebounce = setTimeout(async () => {
+        try {
+            const res = await fetch('/api/ai/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, top_k: 5 })
+            });
+
+            if (!res.ok) { box.style.display = 'none'; return; }
+
+            const data = await res.json();
+            const hits = data.source_metadata || [];
+
+            if (!hits.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
+
+            box.innerHTML = '';
+            hits.forEach(hit => {
+                const text = hit.title || hit.content || '';
+                if (!text) return;
+
+                const item = document.createElement('div');
+                item.className = 'suggestion-item';
+                item.textContent = text;
+                item.addEventListener('click', () => {
+                    // Fill the chat input with selected suggestion
+                    const chatInput = document.getElementById('chat-text');
+                    if (chatInput) chatInput.value = text;
+                    box.innerHTML   = '';
+                    box.style.display = 'none';
+                });
+                box.appendChild(item);
+            });
+
+            box.style.display = 'block';
+        } catch (err) {
+            console.warn('[autosuggest]', err);
+            box.innerHTML = '';
+            box.style.display = 'none';
+        }
+    }, 300);      // 300 ms debounce
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// 6. AI CHAT PANEL
+// ═══════════════════════════════════════════════════════════════
+
+function openChat() {
+    const panel = document.getElementById('chat-panel');
+    if (!panel) return;
+    panel.style.display = 'flex';
+    panel.setAttribute('aria-hidden', 'false');
+
+    // Pre-fill with search input value if present
+    const searchInput = document.getElementById('search-input');
+    const chatText    = document.getElementById('chat-text');
+    if (searchInput && chatText && searchInput.value.trim()) {
+        chatText.value = searchInput.value.trim();
+    }
+
+    chatText?.focus();
+}
+
+function closeChat() {
+    const panel = document.getElementById('chat-panel');
+    if (!panel) return;
+    panel.style.display = 'none';
+    panel.setAttribute('aria-hidden', 'true');
+
+    // Clear suggestions
+    const box = document.getElementById('suggestions');
+    if (box) { box.innerHTML = ''; box.style.display = 'none'; }
+}
+
+async function sendChat() {
+    const chatText = document.getElementById('chat-text');
+    const chatBody = document.getElementById('chat-body');
+    if (!chatText || !chatBody) return;
+
+    const query = chatText.value.trim();
+    if (!query) return;
+
+    chatText.value = '';
+
+    // Clear suggestions
+    const box = document.getElementById('suggestions');
+    if (box) { box.innerHTML = ''; box.style.display = 'none'; }
+
+    // Append user bubble
+    appendChatMsg('user', query, chatBody);
+
+    // Typing indicator
+    const typingId = appendChatMsg('ai typing', '…', chatBody);
+
+    try {
+        const res = await fetch('/api/ai/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query, top_k: 5 })
+        });
+
+        removeMsg(typingId, chatBody);
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const data = await res.json();
+        const answer = (data.answer || '').trim() ||
+                       'I couldn\'t find a specific answer. Please try rephrasing your question.';
+
+        appendChatMsg('ai', answer, chatBody);
+
+        // Also try Gemini for richer responses
+        fetchGeminiEnhancement(query, chatBody);
+
+    } catch (err) {
+        removeMsg(typingId, chatBody);
+        appendChatMsg('ai', 'Sorry – I could not reach the server. Please check your connection.', chatBody);
+        console.warn('[sendChat]', err);
+    }
+}
+
+async function fetchGeminiEnhancement(query, chatBody) {
+    // Non-blocking enrichment via the Gemini endpoint
+    try {
+        const res = await fetch('/api/ai/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: query })
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.response && data.response.trim()) {
+            appendChatMsg('ai gemini', data.response.trim(), chatBody, '✨ Gemini');
+        }
+    } catch (_) { /* silent */ }
+}
+
+function appendChatMsg(role, text, container, label = null) {
+    const msgId = 'msg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+    const div = document.createElement('div');
+    div.id        = msgId;
+    div.className = `chat-msg ${role}`;
+
+    if (label) {
+        const lbl = document.createElement('span');
+        lbl.className   = 'msg-label';
+        lbl.textContent = label;
+        div.appendChild(lbl);
+    }
+
+    const p = document.createElement('p');
+    p.textContent = text;
+    div.appendChild(p);
+
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+    return msgId;
+}
+
+function removeMsg(id, container) {
+    const el = container.querySelector('#' + id);
+    if (el) el.remove();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// 7. PROGRESSIVE PROFILING
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Gracefully show the profile modal when high-intent action detected.
+ * `anchorEl` is the element the user tried to click – we resume it after submit.
+ */
+function triggerProfileCheck(anchorEl) {
+    const hasProfile = Boolean(profileId);
+    const name = localStorage.getItem('p_name');
+
+    if (hasProfile && name) return;   // Profile already complete
+
+    // Store the pending action
+    if (anchorEl) {
+        _pendingAction = () => anchorEl.click();
+    }
+
+    document.getElementById('profile-modal').style.display = 'flex';
+}
+
+function profileNext(currentStep) {
+    // Basic validation
+    if (currentStep === 1) {
+        const name = document.getElementById('p_name')?.value.trim();
+        const age  = document.getElementById('p_age')?.value.trim();
+        if (!name || !age) {
+            showFormError('Please fill in your name and age.'); return;
+        }
+    }
+    if (currentStep === 2) {
+        const email = document.getElementById('p_email')?.value.trim();
+        if (email && !email.includes('@')) {
+            showFormError('Please enter a valid email address.'); return;
         }
     }
 
-    logoutBtn.addEventListener('click', () => {
-        localStorage.removeItem('user');
-        updateAuthUI();
-    });
+    setProfileStep(currentStep, false);
+    setProfileStep(currentStep + 1, true);
+}
 
-    // --- 5. Engagement ---
+function profileBack(targetStep) {
+    setProfileStep(targetStep, false);
+    setProfileStep(targetStep - 1, true);
+}
 
-    engagementForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const payload = {
-            age: document.getElementById('age').value,
-            job: document.getElementById('job').value,
-            interest: document.getElementById('interest').value,
-            timestamp: new Date().toISOString()
-        };
-        await fetch('/api/engagement', {
+function setProfileStep(step, visible) {
+    const el = document.getElementById(`profile-step-${step}`);
+    if (el) el.style.display = visible ? 'block' : 'none';
+}
+
+async function profileSubmit() {
+    const name  = document.getElementById('p_name')?.value.trim()  || '';
+    const age   = document.getElementById('p_age')?.value.trim()   || '';
+    const email = document.getElementById('p_email')?.value.trim() || '';
+    const phone = document.getElementById('p_phone')?.value.trim() || '';
+    const job   = document.getElementById('p_job')?.value.trim()   || '';
+
+    const payload = {
+        step: 'full',
+        data: { name, age, job, phone },
+        ...(email    ? { email }     : {}),
+        ...(profileId ? { profile_id: profileId } : {})
+    };
+
+    try {
+        const res = await fetch('/api/profile/step', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        alert('Data Saved!');
-    });
 
-    
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-    // --- AI Chat Bubble Logic ---
-    const chatBubble = document.getElementById('chat-bubble');
-    const chatWindow = document.getElementById('chat-window');
-    const closeChat = document.getElementById('close-chat');
-    const sendChat = document.getElementById('send-chat');
-    const chatInput = document.getElementById('user-chat-input');
-    const chatMessages = document.getElementById('chat-messages');
+        const data = await res.json();
 
-    chatBubble.addEventListener('click', () => {
-        chatWindow.classList.toggle('hidden');
-    });
-
-    closeChat.addEventListener('click', () => {
-        chatWindow.classList.add('hidden');
-    });
-
-    async function handleChat() {
-        const prompt = chatInput.value.trim();
-        if (!prompt) return;
-
-        // Display user message
-        addMessage('user', prompt);
-        chatInput.value = '';
-
-        // Typing indicator
-        const typingId = addMessage('ai typing', 'Typing...');
-
-        try {
-            const res = await fetch('/api/ai/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt })
-            });
-            const data = await res.json();
-            
-            // Remove typing indicator
-            const typingEl = document.getElementById(typingId);
-            if (typingEl) typingEl.remove();
-
-            if (data.response) {
-                addMessage('ai', data.response);
-            } else {
-                addMessage('ai', "Sorry, I'm having trouble connecting right now.");
-            }
-        } catch (error) {
-            const typingEl = document.getElementById(typingId);
-            if (typingEl) typingEl.remove();
-            addMessage('ai', "Error: Could not reach the server.");
+        // Persist profile ID + name locally
+        if (data.profile_id) {
+            profileId = data.profile_id;
+            localStorage.setItem('profileId', profileId);
         }
+        localStorage.setItem('p_name', name);
+
+        // Close modal
+        document.getElementById('profile-modal').style.display = 'none';
+
+        // Reset steps for next open
+        setProfileStep(1, true);
+        setProfileStep(2, false);
+        setProfileStep(3, false);
+
+        // Resume pending download / link action
+        if (_pendingAction) {
+            const action = _pendingAction;
+            _pendingAction = null;
+            setTimeout(action, 100);
+        }
+
+    } catch (err) {
+        showFormError('Could not save your profile. Please try again.');
+        console.error('[profileSubmit]', err);
     }
+}
 
-    function addMessage(role, text) {
-        const div = document.createElement('div');
-        const id = 'msg-' + Date.now();
-        div.id = id;
-        div.className = `message ${role}`;
-        div.textContent = text;
-        chatMessages.appendChild(div);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
-        return id;
+function showFormError(msg) {
+    let errEl = document.getElementById('profile-form-error');
+    if (!errEl) {
+        errEl = document.createElement('p');
+        errEl.id        = 'profile-form-error';
+        errEl.className = 'form-error';
+        const content = document.querySelector('.modal-content');
+        if (content) content.prepend(errEl);
     }
-
-    sendChat.addEventListener('click', handleChat);
-    chatInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') handleChat();
-    });
-
-    fetchMinistries();
-    updateAuthUI();
-});
+    errEl.textContent = msg;
+    setTimeout(() => { if (errEl) errEl.textContent = ''; }, 4000);
+}
