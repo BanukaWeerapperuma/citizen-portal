@@ -8,7 +8,7 @@ load_dotenv()
 def seed_database():
     mongo_uri = os.getenv('MONGO_URI')
     client = MongoClient(mongo_uri)
-    db = client.get_default_database()
+    db = client['citizen_portal']
     
     services_col = db['services']
     admins_col = db['admins']

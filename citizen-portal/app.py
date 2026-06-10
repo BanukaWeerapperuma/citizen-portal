@@ -8,11 +8,14 @@ import google.generativeai as genai
 from functools import wraps
 from dotenv import load_dotenv
 from datetime import datetime
+import logging
 
-# Load environment variables
+# 1. Initialize Flask & App Configurations
 load_dotenv()
 
-import logging
+# Read from environment variables with default fallbacks
+mongo_uri = os.getenv('MONGO_URI', 'mongodb://localhost:27017/')
+flask_secret = os.getenv('FLASK_SECRET', 'dev-secret')
 
 # Configure logging
 logging.basicConfig(
@@ -22,21 +25,47 @@ logging.basicConfig(
 )
 
 app = Flask(__name__)
+app.secret_key = flask_secret
 CORS(app)
+
+# Safe FAISS Import Fallback
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
+    faiss = None
+
+# FAISS Configuration Paths
+FAISS_INDEX_PATH = "./data/faiss.index"
+FAISS_META_PATH = "./data/faiss_meta.json"
+
+# Lazy-initialization function for sentence-transformer model
+_embed_model = None
+
+def get_embed_model():
+    global _embed_model
+    if _embed_model is None:
+        model_name = os.getenv('EMBED_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
+        from sentence_transformers import SentenceTransformer
+        _embed_model = SentenceTransformer(model_name)
+    return _embed_model
 
 @app.route('/api/ping')
 def ping():
     return jsonify({"status": "alive", "time": datetime.now().isoformat()})
 
-# 2. Connect to MongoDB
-mongo_uri = os.getenv('MONGO_URI')
+# 2. Connect to MongoDB (citizen_portal database)
 client = MongoClient(mongo_uri)
-db = client.get_default_database()  # This will use 'vibex' from the URI
+db = client['citizen_portal']
 
 # Collections
-admins_col = db['admins']
 services_col = db['services']
-engagement_col = db['engagement']
+admins_col = db['admins']
+engagement_col = db['engagements']  # mapped to db['engagements'] for metrics logging
+categories_col = db['categories']
+officers_col = db['officers']
+ads_col = db['ads']
 users_col = db['users']
 
 # 3. Security: admin_required decorator
