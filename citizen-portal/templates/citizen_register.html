@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Citizen Register - Government of Sri Lanka</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #06b6d4;
+            --secondary: #f472b6;
+            --success: #22c55e;
+            --danger: #fb7185;
+            --bg: #050a1a;
+            --text: #eef2ff;
+            --text-muted: #cbd5e1;
+            --surface: rgba(10, 16, 34, 0.95);
+            --border: rgba(255, 255, 255, 0.12);
+            --shadow: 0 30px 70px rgba(0, 0, 0, 0.35);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: radial-gradient(circle at top left, rgba(6, 182, 212, 0.16), transparent 20%),
+                        radial-gradient(circle at bottom right, rgba(244, 114, 182, 0.14), transparent 24%),
+                        linear-gradient(180deg, #071224 0%, #050a1a 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            width: 100%;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.05'%3E%3Ccircle cx='30' cy='30' r='2'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+            pointer-events: none;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            box-shadow: var(--shadow);
+            width: 100%;
+            max-width: 440px;
+            overflow: hidden;
+            animation: slideUp 0.4s ease;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .card-header {
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            padding: 28px 32px 24px;
+            text-align: center;
+            color: white;
+        }
+
+        .card-header .flag {
+            font-size: 2.2rem;
+            margin-bottom: 8px;
+        }
+
+        .card-header h1 {
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .card-header p {
+            font-size: 0.85rem;
+            opacity: 0.85;
+        }
+
+        .card-body {
+            padding: 28px 32px;
+        }
+
+        .form-group {
+            margin-bottom: 18px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+
+        input[type=text],
+        input[type=email],
+        input[type=password],
+        input[type=tel] {
+            width: 100%;
+            padding: 14px 16px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            font-size: 0.95rem;
+            font-family: inherit;
+            transition: border-color 0.2s, box-shadow 0.2s;
+            outline: none;
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text);
+        }
+
+        input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.18);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--secondary);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 14px rgba(244, 114, 182, 0.28);
+        }
+
+        .btn-primary:active {
+            transform: translateY(0);
+        }
+
+        .alert {
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            margin-bottom: 16px;
+            display: none;
+        }
+
+        .alert-error {
+            background: rgba(251, 113, 133, 0.12);
+            color: #fca5a5;
+            border: 1px solid rgba(251, 113, 133, 0.25);
+        }
+
+        .alert-success {
+            background: rgba(34, 197, 94, 0.12);
+            color: #86efac;
+            border: 1px solid rgba(34, 197, 94, 0.25);
+        }
+
+        .divider {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            margin: 8px 0 16px;
+            position: relative;
+        }
+
+        .divider::before,
+        .divider::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            width: 38%;
+            height: 1px;
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .divider::before {
+            left: 0;
+        }
+
+        .divider::after {
+            right: 0;
+        }
+
+        .back-link {
+            display: block;
+            text-align: center;
+            margin-top: 18px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-decoration: none;
+        }
+
+        .back-link:hover {
+            color: var(--primary);
+        }
+
+        .spinner {
+            display: none;
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(255, 255, 255, 0.4);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .pwd-row {
+            position: relative;
+        }
+
+        .pwd-toggle {
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: var(--text-muted);
+            font-size: 1rem;
+            padding: 0;
+        }
+
+        .row-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <div class="card-header">
+            <div class="flag">📝</div>
+            <h1>Citizen Portal</h1>
+            <p>Create an Account</p>
+        </div>
+
+        <div class="card-body">
+            <div class="alert alert-error" id="reg-error"></div>
+            <div class="alert alert-success" id="reg-success"></div>
+            
+            <div class="row-2">
+                <div class="form-group">
+                    <label for="reg-name">Full Name</label>
+                    <input type="text" id="reg-name" placeholder="John Silva">
+                </div>
+                <div class="form-group">
+                    <label for="reg-age">Age</label>
+                    <input type="text" id="reg-age" placeholder="28">
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="reg-email">Email Address</label>
+                <input type="email" id="reg-email" placeholder="you@example.com" autocomplete="email">
+            </div>
+            
+            <div class="form-group">
+                <label for="reg-phone">Mobile Number</label>
+                <input type="tel" id="reg-phone" placeholder="+94 71 234 5678">
+            </div>
+            
+            <div class="row-2">
+                <div class="form-group">
+                    <label for="reg-user-type">User Type</label>
+                    <select id="reg-user-type" style="width: 100%; padding: 11px 14px; border: 2px solid #e5e7eb; border-radius: 8px; font-size: 0.9rem; outline: none; background: white;">
+                        <option value="">Select Type</option>
+                        <option value="student">Student</option>
+                        <option value="doctor">Doctor</option>
+                        <option value="farmer">Farmer</option>
+                        <option value="teacher">Teacher</option>
+                        <option value="engineer">Engineer</option>
+                        <option value="business">Business Owner</option>
+                        <option value="other">Other</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="reg-job">Current Job</label>
+                    <input type="text" id="reg-job" placeholder="e.g. Teacher, Engineer">
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="reg-education">Education</label>
+                <select id="reg-education" style="width: 100%; padding: 11px 14px; border: 2px solid #e5e7eb; border-radius: 8px; font-size: 0.9rem; outline: none; background: white;">
+                    <option value="">Select Education</option>
+                    <option value="school">School Level</option>
+                    <option value="ol">O/L</option>
+                    <option value="al">A/L</option>
+                    <option value="diploma">Diploma</option>
+                    <option value="degree">Bachelor's Degree</option>
+                    <option value="masters">Master's / PhD</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label for="reg-interests">What services are you primarily looking for?</label>
+                <input type="text" id="reg-interests" placeholder="e.g. Healthcare, Education, Passports">
+            </div>
+            
+            <div class="form-group">
+                <label for="reg-password">Password</label>
+                <div class="pwd-row">
+                    <input type="password" id="reg-password" placeholder="Minimum 8 characters">
+                    <button class="pwd-toggle" type="button" onclick="togglePwd('reg-password', this)">👁</button>
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="reg-confirm">Confirm Password</label>
+                <input type="password" id="reg-confirm" placeholder="Re-enter your password">
+            </div>
+            
+            <button class="btn btn-primary" id="reg-btn" onclick="doRegister()">
+                <span id="reg-label">Create Account</span>
+                <div class="spinner" id="reg-spinner"></div>
+            </button>
+            
+            <div class="divider">or</div>
+            <p style="text-align:center;font-size:0.85rem;color:#6b7280;">Already have an account? <a href="/citizen/login" style="color:var(--primary);font-weight:600;">Login here</a></p>
+        </div>
+
+        <a href="/" class="back-link">← Back to Citizen Portal</a>
+        <div style="height:20px;"></div>
+    </div>
+
+    <script>
+        function togglePwd(id, btn) {
+            const inp = document.getElementById(id);
+            inp.type = inp.type === 'password' ? 'text' : 'password';
+            btn.textContent = inp.type === 'password' ? '👁' : '🙈';
+        }
+
+        function showAlert(id, msg) {
+            const el = document.getElementById(id);
+            el.textContent = msg;
+            el.style.display = 'block';
+        }
+        function hideAlerts(...ids) { ids.forEach(id => { document.getElementById(id).style.display = 'none'; }); }
+
+        function setLoading(btn, spinner, label, loading) {
+            document.getElementById(btn).disabled = loading;
+            document.getElementById(spinner).style.display = loading ? 'block' : 'none';
+            document.getElementById(label).style.display = loading ? 'none' : 'block';
+        }
+
+        async function doRegister() {
+            hideAlerts('reg-error', 'reg-success');
+            const name = document.getElementById('reg-name').value.trim();
+            const age = document.getElementById('reg-age').value.trim();
+            const email = document.getElementById('reg-email').value.trim();
+            const phone = document.getElementById('reg-phone').value.trim();
+            const interests = document.getElementById('reg-interests').value.trim();
+            const job = document.getElementById('reg-job').value.trim();
+            const user_type = document.getElementById('reg-user-type').value.trim();
+            const education = document.getElementById('reg-education').value.trim();
+            const password = document.getElementById('reg-password').value;
+            const confirm = document.getElementById('reg-confirm').value;
+
+            if (!name || !email || !password) { showAlert('reg-error', 'Name, email and password are required.'); return; }
+            if (password.length < 8) { showAlert('reg-error', 'Password must be at least 8 characters.'); return; }
+            if (password !== confirm) { showAlert('reg-error', 'Passwords do not match.'); return; }
+
+            setLoading('reg-btn', 'reg-spinner', 'reg-label', true);
+            try {
+                const res = await fetch('/api/citizen/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, age, email, phone, interests, job, user_type, education, password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    showAlert('reg-success', '✓ Account created! You can now login.');
+                    setTimeout(() => window.location.href = '/citizen/login', 2000);
+                    // Clear form
+                    document.getElementById('reg-email').value = '';
+                    document.getElementById('reg-password').value = '';
+                    document.getElementById('reg-confirm').value = '';
+                } else {
+                    showAlert('reg-error', data.error || 'Registration failed. Try again.');
+                }
+            } catch (e) {
+                showAlert('reg-error', 'Connection error. Please try again.');
+            }
+            setLoading('reg-btn', 'reg-spinner', 'reg-label', false);
+        }
+
+        // Submit on Enter key
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Enter') {
+                doRegister();
+            }
+        });
+    </script>
+</body>
+
+</html>

@@ -1,180 +1,1403 @@
+#!/usr/bin/env python3
+"""
+Seed script for Citizen Portal database.
+
+Improvements in this update:
+- Fail fast if MONGO_URI missing
+- Idempotent-ish behavior: clears only sample users, and attempts to insert documents with uniqueness indexes
+- Adds useful indexes for performance
+- Better logging and error handling
+- Wraps execution in a main guard so it can be imported safely
+"""
+
+from pymongo import MongoClient, errors
+from datetime import datetime, timedelta, timezone
 import os
-from pymongo import MongoClient
+import random
 from dotenv import load_dotenv
+import bcrypt
+import sys
 
-# Load environment variables
-load_dotenv()
+if os.path.exists(".env"):
+    load_dotenv()
+elif os.path.exists("backend/.env"):
+    load_dotenv("backend/.env")
 
-def seed_database():
-    mongo_uri = os.getenv('MONGO_URI')
-    client = MongoClient(mongo_uri)
-    db = client['citizen_portal']
-    
-    services_col = db['services']
-    admins_col = db['admins']
-    
-    # 1. Clear existing data
-    services_col.delete_many({})
-    
-    # 2. Sri Lanka Ministries and Services (12 Ministries)
-    docs = [
+# MongoDB connection
+MONGO_URI = os.getenv("MONGO_URI")
+DB_NAME = os.getenv("DB_NAME", "citizen_portal")
+
+if not MONGO_URI:
+    print("ERROR: MONGO_URI not set in environment. Exiting.", file=sys.stderr)
+    sys.exit(1)
+
+client = MongoClient(MONGO_URI)
+db = client[DB_NAME]
+
+# Collections
+services_col = db["services"]
+categories_col = db["categories"]
+officers_col = db["officers"]
+ads_col = db["ads"]
+products_col = db["products"]
+users_col = db["users"]
+admins_col = db["admins"]
+orders_col = db["orders"]
+payments_col = db["payments"]
+
+def create_indexes():
+    """
+    Create useful indexes to improve query performance and enforce uniqueness where appropriate.
+    Safe to call multiple times.
+    """
+    try:
+        categories_col.create_index("id", unique=True)
+        services_col.create_index("id", unique=True)
+        ads_col.create_index("id", unique=True)
+        products_col.create_index("id", unique=True)
+        officers_col.create_index("id", unique=True)
+        admins_col.create_index("username", unique=True)
+        users_col.create_index("email", unique=True)
+        users_col.create_index("sample_data")
+        users_col.create_index("created")
+        products_col.create_index("tags")
+        products_col.create_index("target_segments")
+        products_col.create_index("category")
+        eng_index = db["engagements"]
+        eng_index.create_index("user_id")
+        orders_col.create_index("order_id", unique=True)
+        payments_col.create_index("payment_id", unique=True)
+        print("✓ Indexes created/ensured")
+    except Exception as e:
+        print(f"Warning: creating indexes failed: {e}")
+
+def clear_collections():
+    """
+    Clear non-critical collections before seeding.
+    Keep production-safe: only delete sample users (sample_data=True).
+    """
+    print("\n[1/7] Clearing existing data (limited):")
+    try:
+        services_col.delete_many({})
+        categories_col.delete_many({})
+        officers_col.delete_many({})
+        ads_col.delete_many({})
+        products_col.delete_many({})
+        # Keep users but remove only sample data to avoid accidental deletion
+        users_col.delete_many({"sample_data": True})
+        print("✓ Collections cleared (services, categories, officers, ads, products, sample users)")
+    except Exception as e:
+        print(f"Error clearing collections: {e}", file=sys.stderr)
+
+def seed_categories():
+    print("\n[2/7] Seeding categories...")
+    categories = [
         {
-            "id": "ministry_finance",
-            "name": {"en": "Ministry of Finance", "si": "මුදල් අමාත්‍යාංශය", "ta": "நிதி அமைச்சு"},
-            "contact": {"phone": "0112 484 500", "email": "info@treasury.gov.lk"},
-            "links": [{"title": {"en": "Finance Ministry", "si": "මුදල් අමාත්‍යාංශය", "ta": "நிதி அமைச்சு"}, "url": "https://www.treasury.gov.lk/"}],
-            "subservices": [
-                {"id": "budget", "name": {"en": "National Budgeting", "si": "ජාතික අයවැයකරණය", "ta": "தேசிய வரவுசெலவுத் திட்டம்"}, "questions": [{"q": {"en": "How to see the national budget?", "si": "ජාතික අයවැය බලන්නේ කෙසේද?", "ta": "தேசிய வரவுசெலவுத் திட்டத்தை எவ்வாறு பார்ப்பது?"}, "answer": {"en": "Visit the treasury portal for latest reports.", "si": "නවතම වාර්තා සඳහා භාණ්ඩාගාර ද්වාරයට පිවිසෙන්න.", "ta": "சமீபத்திய அறிக்கைகளுக்கு கருவூல போர்ட்டலைப் பார்வையிடவும்."}}]},
-                {"id": "tax", "name": {"en": "Tax Policy (Inland Revenue)", "si": "බදු ප්‍රතිපත්තිය (දේශීය ආදායම්)", "ta": "வரி கொள்கை (உள்நாட்டு வருவாய்)"}, "questions": [{"q": {"en": "How to register for TIN?", "si": "TIN සඳහා ලියාපදිංචි වන්නේ කෙසේද?", "ta": "TIN இற்கு எவ்வாறு பதிவு செய்வது?"}, "answer": {"en": "Register via the Inland Revenue website.", "si": "දේශීය ආදායම් වෙබ් අඩවිය හරහා ලියාපදිංචි වන්න.", "ta": "உள்நாட்டு வருவாய் வலைத்தளம் மூலம் பதிவு செய்யவும்."}}]},
-                {"id": "customs", "name": {"en": "Custom Duties", "si": "රේගු බදු", "ta": "சுங்க வரிகள்"}, "questions": [{"q": {"en": "What are custom rates?", "si": "රේගු ගාස්තු මොනවාද?", "ta": "சுங்க விகிதங்கள் என்ன?"}, "answer": {"en": "Refer to Sri Lanka Customs official page.", "si": "ශ්‍රී ලංකා රේගු නිල පිටුව බලන්න.", "ta": "இலங்கை சுங்க அதிகாரப்பூர்வ பக்கத்தைப் பார்க்கவும்."}}]},
-                {"id": "stabilization", "name": {"en": "Economic Stabilization", "si": "ආර්ථික ස්ථායීකරණය", "ta": "பொருளாதார ஸ்திரப்படுத்தல்"}, "questions": [{"q": {"en": "Latest economic status?", "si": "නවතම ආර්ථික තත්ත්වය?", "ta": "சமீபத்திய பொருளாதார நிலை?"}, "answer": {"en": "Check the central bank or treasury updates.", "si": "මහ බැංකු හෝ භාණ්ඩාගාර යාවත්කාලීන කිරීම් පරීක්ෂා කරන්න.", "ta": "மத்திய வங்கி அல்லது கருவூல புதுப்பிப்புகளைச் சரிபார்க்கவும்."}}]}
-            ]
+            "id": "cat_it",
+            "name": {"en": "IT & Digital Services", "si": "තොරතුරු සහ ඩිජිටල්", "ta": "தகவல் மற்றும் டிஜிட்டல்"},
+            "ministry_ids": ["ministry_it"],
+            "icon": "computer",
+            "created": datetime.now(timezone.utc)
         },
         {
-            "id": "ministry_education",
-            "name": {"en": "Ministry of Education", "si": "අධ්‍යාපන අමාත්‍යාංශය", "ta": "கல்வி அமைச்சு"},
-            "contact": {"phone": "0112 785 141", "email": "info@moe.gov.lk"},
-            "links": [{"title": {"en": "MOE Portal", "si": "අධ්‍යාපන ද්වාරය", "ta": "கல்வி போர்டல்"}, "url": "https://moe.gov.lk/"}],
-            "subservices": [
-                {"id": "admission", "name": {"en": "School Admissions", "si": "පාසල් ඇතුළත් කිරීම්", "ta": "பள்ளி சேர்க்கை"}, "questions": [{"q": {"en": "How to apply for Grade 1?", "si": "1 ශ්‍රේණිය සඳහා අයදුම් කරන්නේ කෙසේද?", "ta": "முதலாம் வகுப்பிற்கு எவ்வாறு விண்ணப்பிப்பது?"}, "answer": {"en": "Follow the circular issued on MOE website.", "si": "අධ්‍යාපන අමාත්‍යාංශ වෙබ් අඩවියේ නිකුත් කර ඇති චක්‍රලේඛය අනුගමනය කරන්න.", "ta": "கல்வி அமைச்சின் இணையதளத்தில் வெளியிடப்பட்ட சுற்றறிக்கையைப் பின்பற்றவும்."}}]},
-                {"id": "placements", "name": {"en": "Teacher Placements", "si": "ගුරු ස්ථානගත කිරීම්", "ta": "ஆசிரியர் இடமாற்றம்"}, "questions": [{"q": {"en": "How to request a transfer?", "si": "මාරුවීමක් ඉල්ලන්නේ කෙසේද?", "ta": "இடமாற்றம் கோருவது எப்படி?"}, "answer": {"en": "Apply through the teacher transfer portal.", "si": "ගුරු මාරු කිරීමේ ද්වාරය හරහා අයදුම් කරන්න.", "ta": "ஆசிரியர் இடமாற்ற போர்டல் மூலம் விண்ணப்பிக்கவும்."}}]},
-                {"id": "exams", "name": {"en": "National Exam Coordination", "si": "ජාතික විභාග සම්බන්ධීකරණය", "ta": "தேசிய தேர்வு ஒருங்கிணைப்பு"}, "questions": [{"q": {"en": "When is the next exam?", "si": "ඊළඟ විභාගය කවදාද?", "ta": "அடுத்த தேர்வு எப்போது?"}, "answer": {"en": "Check doenets.lk for schedules.", "si": "කාලසටහන් සඳහා doenets.lk පරීක්ෂා කරන්න.", "ta": "அட்டவணைகளுக்கு doenets.lk ஐ சரிபார்க்கவும்."}}]},
-                {"id": "curriculum", "name": {"en": "Curriculum Development", "si": "විෂයමාලා සංවර්ධනය", "ta": "பாடத்திட்ட மேம்பாடு"}, "questions": [{"q": {"en": "Where to get textbooks?", "si": "පෙළපොත් ලබා ගන්නේ කොහෙන්ද?", "ta": "பாடப்புத்தகங்களை எங்கே பெறுவது?"}, "answer": {"en": "Visit the Educational Publications Department.", "si": "අධ්‍යාපන ප්‍රකාශන දෙපාර්තමේන්තුවට පිවිසෙන්න.", "ta": "கல்வி வெளியீட்டுத் துறைக்குச் செல்லவும்."}}]}
-            ]
+            "id": "cat_public",
+            "name": {"en": "Public Administration", "si": "පොදු පරිපාලන", "ta": "பொது நிர்வாகம்"},
+            "ministry_ids": ["ministry_public"],
+            "icon": "government",
+            "created": datetime.now(timezone.utc)
         },
         {
-            "id": "ministry_health",
-            "name": {"en": "Ministry of Health", "si": "සෞඛ්‍ය අමාත්‍යාංශය", "ta": "சுகாதார அமைச்சு"},
-            "contact": {"phone": "0112 669 192", "email": "postmaster@health.gov.lk"},
-            "links": [{"title": {"en": "Health Ministry", "si": "සෞඛ්‍ය අමාත්‍යාංශය", "ta": "சுகாதார அமைச்சு"}, "url": "https://www.health.gov.lk/"}],
+            "id": "cat_land",
+            "name": {"en": "Land & Housing", "si": "ඉඩම් සහ නිවාස", "ta": "நிலம் மற்றும் வீடுகள்"},
+            "ministry_ids": ["ministry_land", "ministry_housing"],
+            "icon": "home",
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "cat_education",
+            "name": {"en": "Education", "si": "අධ්‍යාපනය", "ta": "கல்வி"},
+            "ministry_ids": ["ministry_education"],
+            "icon": "school",
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "cat_health",
+            "name": {"en": "Health Services", "si": "සෞඛ්‍ය සේවා", "ta": "சுகாதார சேவைகள்"},
+            "ministry_ids": ["ministry_health"],
+            "icon": "hospital",
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "cat_transport",
+            "name": {"en": "Transport & Vehicles", "si": "ප්‍රවාහන සහ වාහන", "ta": "போக்குவரத்து மற்றும் வாகனங்கள்"},
+            "ministry_ids": ["ministry_transport"],
+            "icon": "car",
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "cat_immigration",
+            "name": {"en": "Immigration & Emigration", "si": "ආගමන හා විගමන", "ta": "குடிவரவு மற்றும் குடியகல்வு"},
+            "ministry_ids": ["dept_immigration"],
+            "icon": "passport",
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "cat_finance",
+            "name": {"en": "Finance & Tax", "si": "මුදල් සහ බදු", "ta": "நிதி மற்றும் வரி"},
+            "ministry_ids": ["ministry_finance"],
+            "icon": "money",
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "cat_agriculture",
+            "name": {"en": "Agriculture", "si": "කෘෂිකර්මය", "ta": "விவசாயம்"},
+            "ministry_ids": ["ministry_agriculture"],
+            "icon": "leaf",
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "cat_documents",
+            "name": {"en": "Official Documents & Services", "si": "නිල ලේඛන සහ සේවා", "ta": "அதிகாரபூர்வ ஆவணங்கள் மற்றும் சேவைகள்"},
+            "ministry_ids": ["ministry_documents"],
+            "icon": "document",
+            "created": datetime.now(timezone.utc)
+        },
+    ]
+    try:
+        categories_col.insert_many(categories, ordered=False)
+        print(f"✓ Seeded {len(categories)} categories")
+    except errors.BulkWriteError as bwe:
+        print("Note: some categories may already exist or had duplicate keys. BulkWriteError:", bwe.details)
+    except Exception as e:
+        print(f"Failed to seed categories: {e}", file=sys.stderr)
+
+def seed_services():
+    print("\n[3/7] Seeding services...")
+    services = [
+        {
+            "id": "ministry_documents",
+            "category": "cat_documents",
+            "name": {"en": "Department for Registration of Persons & RGD", "si": "පුද්ගලයින් ලියාපදිංචි කිරීමේ දෙපාර්තමේන්තුව", "ta": "ஆட்பதிவுத் திணைக்களம்"},
             "subservices": [
-                {"id": "healthcare", "name": {"en": "Free Healthcare & Hospitals", "si": "නොමිලේ සෞඛ්‍ය සේවා සහ රෝහල්", "ta": "இலவச சுகாதாரம் மற்றும் மருத்துவமனைகள்"}, "questions": [{"q": {"en": "Is treatment free?", "si": "ප්‍රතිකාර නොමිලේ ද?", "ta": "சிகிச்சை இலவசமா?"}, "answer": {"en": "Yes, all government hospitals provide free treatment.", "si": "ඔව්, සියලුම රජයේ රෝහල් නොමිලේ ප්‍රතිකාර ලබා දෙයි.", "ta": "ஆம், அனைத்து அரசு மருத்துவமனைகளும் இலவச சிகிச்சை அளிக்கின்றன."}}]},
-                {"id": "surveillance", "name": {"en": "Disease Surveillance (Dengue/NCDs)", "si": "රෝග නිරීක්ෂණය (ඩෙංගු/NCDs)", "ta": "நோய் கண்காணிப்பு (டெங்கு/NCDகள்)"}, "questions": [{"q": {"en": "Dengue alerts?", "si": "ඩෙංගු අනතුරු ඇඟවීම්?", "ta": "டெங்கு எச்சரிக்கைகள்?"}, "answer": {"en": "Check the Epidemiology Unit website.", "si": "වසංගත රෝග විද්‍යා අංශයේ වෙබ් අඩවිය පරීක්ෂා කරන්න.", "ta": "தொற்றுநோயியல் பிரிவு இணையதளத்தைப் பார்க்கவும்."}}]},
-                {"id": "immunization", "name": {"en": "Immunization Programs", "si": "එන්නත් කිරීමේ වැඩසටහන්", "ta": "தடுப்பூசி திட்டங்கள்"}, "questions": [{"q": {"en": "Vaccine schedule?", "si": "එන්නත් කාලසටහන?", "ta": "தடுப்பூசி அட்டவணை?"}, "answer": {"en": "Available at all local MOH offices.", "si": "සියලුම ප්‍රාදේශීය MOH කාර්යාලවල පවතී.", "ta": "அனைத்து உள்ளூர் MOH அலுவலகங்களிலும் கிடைக்கிறது."}}]},
-                {"id": "maternal", "name": {"en": "Maternal & Child Health", "si": "මාතෘ හා ළමා සෞඛ්‍යය", "ta": "தாய் மற்றும் சேய் ஆரோக்கியம்"}, "questions": [{"q": {"en": "Nutrition advice?", "si": "පෝෂණ උපදෙස්?", "ta": "ஊட்டச்சத்து ஆலோசனை?"}, "answer": {"en": "Consult your local midwife or family health clinic.", "si": "ඔබේ ප්‍රාදේශීය වින්නඹු මාතාව හෝ පවුල් සෞඛ්‍ය සායනය විමසන්න.", "ta": "உங்கள் உள்ளூர் மருத்துவச்சி அல்லது குடும்ப சுகாதார கிளினிக்கை அணுகவும்."}}]}
-            ]
+                {
+                    "id": "nic_service",
+                    "name": {"en": "National Identity Card (NIC)", "si": "ජාතික හැඳුනුම්පත", "ta": "தேசிய அடையாள அட்டை"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to apply for a new NIC?", "si": "නව ජාතික හැඳුනුම්පතක් සඳහා අයදුම් කරන්නේ කෙසේද?", "ta": "புதிய தேசிய அடையாள அட்டைக்கு எவ்வாறு விண்ணப்பிப்பது?"},
+                            "answer": {"en": "Submit your application through your Grama Niladhari to the Divisional Secretariat.", "si": "ඔබගේ අයදුම්පත ග්‍රාම නිලධාරී හරහා ප්‍රාදේශීය ලේකම් කාර්යාලයට ඉදිරිපත් කරන්න.", "ta": "உங்கள் கிராம உத்தியோகத்தர் மூலம் பிரதேச செயலகத்திற்கு விண்ணப்பத்தை சமர்ப்பிக்கவும்."},
+                            "downloads": ["/static/docs/nic-application.pdf"],  # Official DRP form
+                            "location": "https://drp.gov.lk",
+                            "verified_source": True,
+                            "eligibility": "Sri Lankan citizen over 15 years of age",
+                            "processing_time": "1 Day (Urgent), 14 Days (Normal)",
+                            "supporting_docs": ["Birth Certificate", "Grama Niladhari Certificate", "3 Passport Size Photos"]
+                        }
+                    ]
+                },
+                {
+                    "id": "civil_certs",
+                    "name": {"en": "Birth/Marriage/Death Certificates", "si": "උප්පැන්න/විවාහ/මරණ සහතික", "ta": "பிறப்பு/திருமண/இறப்பு சான்றிதழ்கள்"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to obtain a certified copy of a birth certificate?", "si": "උප්පැන්න සහතිකයේ සහතික කළ පිටපතක් ලබා ගන්නේ කෙසේද?", "ta": "பிறப்புச் சான்றிதழின் சான்றளிக்கப்பட்ட நகலை எவ்வாறு பெறுவது?"},
+                            "answer": {"en": "Apply via the Registrar General's Department online portal or visit your Divisional Secretariat.", "si": "රෙජිස්ට්‍රාර් ජනරාල් දෙපාර්තමේන්තුවේ මාර්ගගත ද්වාරය හරහා අයදුම් කරන්න.", "ta": "பதிவாளர் நாயகம் திணைக்களத்தின் இணைய தளம் மூலம் விண்ணப்பிக்கவும்."},
+                            "downloads": ["/static/docs/B63-BirthCert.pdf"],  # Official RGD Birth Cert form
+                            "location": "https://www.rgd.gov.lk",
+                            "verified_source": True,
+                            "eligibility": "Any citizen",
+                            "processing_time": "3-5 Working Days",
+                            "supporting_docs": ["NIC Copy", "Application Form B63"]
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "dept_immigration",
+            "category": "cat_immigration",
+            "name": {"en": "Department of Immigration & Emigration", "si": "ආගමන හා විගමන දෙපාර්තමේන්තුව", "ta": "குடிவரவு மற்றும் குடியகல்வு திணைக்களம்"},
+            "subservices": [
+                {
+                    "id": "passport_service",
+                    "name": {"en": "Passport Services", "si": "විදේශ ගමන් බලපත්‍ර සේවා"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to apply for a new passport?", "si": "නව විදේශ ගමන් බලපත්‍රයක් සඳහා අයදුම් කරන්නේ කෙසේද?"},
+                            "answer": {"en": "Book an appointment online and visit the head office or regional office. Online appointment is mandatory.", "si": "මාර්ගගතව වේලාවක් වෙන්කර ප්‍රධාන කාර්යාලයට හෝ ප්‍රාදේශීය කාර්යාලයට පැමිණෙන්න."},
+                            "location": "https://www.immigration.gov.lk",
+                            "downloads": ["/static/docs/K35A-Passport.pdf"],  # Official Immigration Department form
+                            "verified_source": True,
+                            "eligibility": "Sri Lankan Citizen",
+                            "processing_time": "1 Day (Urgent LKR 20,000), 30 Days (Normal LKR 5,000)",
+                            "supporting_docs": ["Original Birth Certificate", "NIC", "Studio Photo Receipt"]
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
         },
         {
             "id": "ministry_transport",
-            "name": {"en": "Ministry of Transport", "si": "ප්‍රවාහන අමාත්‍යාංශය", "ta": "போக்குவரத்து அமைச்சு"},
-            "contact": {"phone": "0112 187 200", "email": "mintransport@sltnet.lk"},
-            "links": [{"title": {"en": "Transport Ministry", "si": "ප්‍රවාහන අමාත්‍යාංශය", "ta": "போக்குவரத்து அமைச்சு"}, "url": "http://transport.gov.lk/"}],
+            "category": "cat_transport",
+            "name": {"en": "Department of Motor Traffic", "si": "මෝටර් රථ ප්‍රවාහන දෙපාර්තමේන්තුව", "ta": "மோட்டார் போக்குவரத்து திணைக்களம்"},
             "subservices": [
-                {"id": "license", "name": {"en": "Driving Licenses (DMT)", "si": "රියදුරු බලපත්‍ර (DMT)", "ta": "ஓட்டுநர் உரிமங்கள் (DMT)"}, "questions": [{"q": {"en": "How to renew license?", "si": "බලපත්‍රය අලුත් කරන්නේ කෙසේද?", "ta": "உரிமத்தை எவ்வாறு புதுப்பிப்பது?"}, "answer": {"en": "Apply at DMT Werahera or online.", "si": "වේරහැර DMT කාර්යාලයට හෝ මාර්ගගතව අයදුම් කරන්න.", "ta": "வேரஹெர DMT அல்லது ஆன்லைனில் விண்ணப்பிக்கவும்."}}]},
-                {"id": "railway", "name": {"en": "Railway Services", "si": "දුම්රිය සේවා", "ta": "ரயில் சேவைகள்"}, "questions": [{"q": {"en": "Train tickets online?", "si": "දුම්රිය ටිකට් පත් මාර්ගගතව?", "ta": "ரயில் டிக்கெட்டுகள் ஆன்லைனில்?"}, "answer": {"en": "Visit railway.gov.lk for seat bookings.", "si": "ආසන වෙන්කරවා ගැනීම සඳහා railway.gov.lk වෙත පිවිසෙන්න.", "ta": "இருக்கை முன்பதிவு செய்ய railway.gov.lk ஐப் பார்வையிடவும்."}}]},
-                {"id": "bus", "name": {"en": "Public Bus Regulation", "si": "පොදු බස් රථ නියාමනය", "ta": "பொது பஸ் ஒழுங்குமுறை"}, "questions": [{"q": {"en": "Bus route info?", "si": "බස් මාර්ග තොරතුරු?", "ta": "பஸ் வழித்தட தகவல்?"}, "answer": {"en": "Contact NTC for route and fare details.", "si": "මාර්ග සහ ගාස්තු විස්තර සඳහා NTC අමතන්න.", "ta": "வழித்தடம் மற்றும் கட்டண விவரங்களுக்கு NTC ஐ தொடர்பு கொள்ளவும்."}}]},
-                {"id": "vehicle_reg", "name": {"en": "Vehicle Registrations", "si": "වාහන ලියාපදිංචි කිරීම්", "ta": "வாகனப் பதிவு"}, "questions": [{"q": {"en": "How to transfer ownership?", "si": "අයිතිය පවරන්නේ කෙසේද?", "ta": "உரிமையை மாற்றுவது எப்படி?"}, "answer": {"en": "Visit DMT with transfer documents.", "si": "මාරු කිරීමේ ලේඛන සමඟ DMT වෙත පිවිසෙන්න.", "ta": "மாற்ற ஆவணங்களுடன் DMT ஐப் பார்வையிடவும்."}}]}
-            ]
+                {
+                    "id": "driving_license",
+                    "name": {"en": "Driving License Services", "si": "රියදුරු බලපත්‍ර සේවා"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to apply for a new driving license?"},
+                            "answer": {"en": "Visit DMT Werahera or a district office with your NIC and NTMI medical certificate."},
+                            "location": "https://dmt.gov.lk",
+                            "downloads": ["/static/docs/MTA30-DrivingLicense.pdf"],  # Official DMT form MTA30
+                            "verified_source": True,
+                            "eligibility": "Age 18+ for Light Vehicles",
+                            "processing_time": "Written exam immediately, practical after 3 months",
+                            "supporting_docs": ["NIC", "Birth Certificate", "NTMI Medical Certificate"]
+                        }
+                    ]
+                },
+                {
+                    "id": "vehicle_reg",
+                    "name": {"en": "Vehicle Registration & Transfer", "si": "වාහන ලියාපදිංචිය සහ පැවරීම"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to transfer vehicle ownership?"},
+                            "answer": {"en": "Submit MTA 6 and MTA 8 forms along with the CR and revenue license to the DMT."}
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
         },
         {
-            "id": "ministry_foreign",
-            "name": {"en": "Ministry of Foreign Affairs", "si": "විදේශ කටයුතු අමාත්‍යාංශය", "ta": "வெளிவிவகார அமைச்சு"},
-            "contact": {"phone": "0112 323 015", "email": "mfa@gov.lk"},
-            "links": [{"title": {"en": "MFA Website", "si": "විදේශ කටයුතු අමාත්‍යාංශය", "ta": "வெளிவிவகார அமைச்சு"}, "url": "https://mfa.gov.lk/"}],
+            "id": "ministry_finance",
+            "category": "cat_finance",
+            "name": {"en": "Inland Revenue Department", "si": "දේශීය ආදායම් දෙපාර්තමේන්තුව", "ta": "உள்நாட்டு இறைவரித் திணைக்களம்"},
             "subservices": [
-                {"id": "consular", "name": {"en": "Consular Services (Attestations)", "si": "කොන්සියුලර් සේවා (සහතික කිරීම්)", "ta": "தூதரக சேவைகள் (சான்றளிப்பு)"}, "questions": [{"q": {"en": "How to attest degree cert?", "si": "උපාධි සහතිකය සහතික කරන්නේ කෙසේද?", "ta": "பட்டச் சான்றிதழை எவ்வாறு சான்றளிப்பது?"}, "answer": {"en": "Book an appointment online and visit MFA.", "si": "මාර්ගගතව පත්වීමක් වෙන් කර MFA වෙත පිවිසෙන්න.", "ta": "ஆன்லைனில் சந்திப்பை முன்பதிவு செய்து MFA ஐப் பார்வையிடவும்."}}]},
-                {"id": "pass_abroad", "name": {"en": "Passport Assistance Abroad", "si": "විදේශයන්හි විදේශ ගමන් බලපත්‍ර සහාය", "ta": "வெளிநாடுகளில் கடவுச்சீட்டு உதவி"}, "questions": [{"q": {"en": "Lost passport abroad?", "si": "විදේශයකදී විදේශ ගමන් බලපත්‍රය නැති වුනාද?", "ta": "வெளிநாட்டில் கடவுச்சீட்டு தொலைந்ததா?"}, "answer": {"en": "Contact the nearest Sri Lankan Embassy.", "si": "ළඟම ඇති ශ්‍රී ලංකා තානාපති කාර්යාලය අමතන්න.", "ta": "அருகிலுள்ள இலங்கை தூதரகத்தை தொடர்பு கொள்ளவும்."}}]},
-                {"id": "repatriation", "name": {"en": "Repatriation Support", "si": "නැවත පැමිණීමේ සහාය", "ta": "தாயகம் திரும்புவதற்கான ஆதரவு"}, "questions": [{"q": {"en": "Need to come back to SL?", "si": "නැවත ශ්‍රී ලංකාවට පැමිණීමට අවශ්‍යද?", "ta": "இலங்கைக்கு திரும்ப வேண்டுமா?"}, "answer": {"en": "Consult the consular division for emergency travel docs.", "si": "හදිසි ගමන් ලේඛන සඳහා කොන්සියුලර් අංශයෙන් විමසන්න.", "ta": "அவசர பயண ஆவணங்களுக்கு தூதரகப் பிரிவை அணுகவும்."}}]},
-                {"id": "diplomatic", "name": {"en": "Diplomatic Relations", "si": "රාජ්‍ය තාන්ත්‍රික සබඳතා", "ta": "ராஜதந்திர உறவுகள்"}, "questions": [{"q": {"en": "Who is the ambassador?", "si": "තානාපති කවුද?", "ta": "தூதுவர் யார்?"}, "answer": {"en": "List of missions available on MFA website.", "si": "MFA වෙබ් අඩවියේ ඇති දූත මණ්ඩල ලැයිස්තුව බලන්න.", "ta": "MFA இணையதளத்தில் கிடைக்கும் பணிகளின் பட்டியல்."}}]}
-            ]
-        },
-        {
-            "id": "ministry_agri",
-            "name": {"en": "Ministry of Agriculture", "si": "කෘෂිකර්ම අමාත්‍යාංශය", "ta": "விவசாய அமைச்சு"},
-            "contact": {"phone": "0112 669 300", "email": "info@agrimin.gov.lk"},
-            "links": [{"title": {"en": "Agriculture Ministry", "si": "කෘෂිකර්ම අමාත්‍යාංශය", "ta": "விவசாய அமைச்சு"}, "url": "http://www.agrimin.gov.lk/"}],
-            "subservices": [
-                {"id": "advisory", "name": {"en": "Farmer Advisory (1920 Center)", "si": "ගොවි උපදේශනය (1920 මධ්‍යස්ථානය)", "ta": "விவசாயிகள் ஆலோசனை (1920 மையம்)"}, "questions": [{"q": {"en": "Pest control tips?", "si": "පළිබෝධ පාලන උපදෙස්?", "ta": "பூச்சி கட்டுப்பாடு குறிப்புகள்?"}, "answer": {"en": "Call 1920 for expert agricultural advice.", "si": "විශේෂඥ කෘෂිකාර්මික උපදෙස් සඳහා 1920 අමතන්න.", "ta": "நிபுணத்துவ விவசாய ஆலோசனைக்கு 1920 ஐ அழைக்கவும்."}}]},
-                {"id": "fertilizer", "name": {"en": "Fertilizer Distribution", "si": "පොහොර බෙදා හැරීම", "ta": "உர விநியோகம்"}, "questions": [{"q": {"en": "How to get urea?", "si": "යූරියා ලබා ගන්නේ කෙසේද?", "ta": "யுரியாவை எப்படி பெறுவது?"}, "answer": {"en": "Contact your local Agrarian Service center.", "si": "ඔබේ ප්‍රාදේශීය ගොවිජන සේවා මධ්‍යස්ථානය අමතන්න.", "ta": "உங்கள் உள்ளூர் விவசாய சேவை மையத்தை தொடர்பு கொள்ளவும்."}}]},
-                {"id": "certification", "name": {"en": "Seed & Plant Certification", "si": "බීජ හා පැළෑටි සහතික කිරීම", "ta": "விதை மற்றும் தாவர சான்றிதழ்"}, "questions": [{"q": {"en": "Are these seeds certified?", "si": "මෙම බීජ සහතික කර තිබේද?", "ta": "இந்த விதைகள் சான்றளிக்கப்பட்டதா?"}, "answer": {"en": "Verify labels with Department of Agriculture.", "si": "කෘෂිකර්ම දෙපාර්තමේන්තුව සමඟ ලේබල් සත්‍යාපනය කරන්න.", "ta": "விவசாயத் துறையுடன் லேபிள்களைச் சரிபார்க்கவும்."}}]},
-                {"id": "insurance", "name": {"en": "Crop Insurance", "si": "බෝග රක්ෂණය", "ta": "பயிர் காப்பீடு"}, "questions": [{"q": {"en": "Insurance for flood damage?", "si": "ගංවතුර හානිය සඳහා රක්ෂණය?", "ta": "வெள்ள சேதத்திற்கான காப்பீடு?"}, "answer": {"en": "Apply via the Agricultural and Agrarian Insurance Board.", "si": "කෘෂිකාර්මික හා ගොවිජන රක්ෂණ මණ්ඩලය හරහා අයදුම් කරන්න.", "ta": "விவசாய மற்றும் விவசாய காப்பீட்டு வாரியம் மூலம் விண்ணப்பிக்கவும்."}}]}
-            ]
-        },
-        {
-            "id": "ministry_energy",
-            "name": {"en": "Ministry of Power & Energy", "si": "විදුලිබල හා බලශක්ති අමාත්‍යාංශය", "ta": "மின்சக்தி மற்றும் எரிசக்தி அமைச்சு"},
-            "contact": {"phone": "0112 370 033", "email": "info@powermin.gov.lk"},
-            "links": [{"title": {"en": "Power & Energy", "si": "විදුලිබල හා බලශක්ති", "ta": "மின்சக்தி மற்றும் எரிசக்தி"}, "url": "http://powermin.gov.lk/"}],
-            "subservices": [
-                {"id": "electricity", "name": {"en": "Electricity Connections", "si": "විදුලි සම්බන්ධතා", "ta": "மின்சார இணைப்புகள்"}, "questions": [{"q": {"en": "Apply for new connection?", "si": "නව සම්බන්ධතාවයක් සඳහා අයදුම් කරනවාද?", "ta": "புதிய இணைப்பிற்கு விண்ணப்பிக்கவா?"}, "answer": {"en": "Submit form at nearest CEB/LECO office.", "si": "ළඟම ඇති CEB/LECO කාර්යාලයට පෝරමය ඉදිරිපත් කරන්න.", "ta": "அருகிலுள்ள CEB/LECO அலுவலகத்தில் படிவத்தைச் சமர்ப்பிக்கவும்."}}]},
-                {"id": "fuel", "name": {"en": "Fuel Import & Distribution", "si": "ඉන්ධන ආනයනය සහ බෙදා හැරීම", "ta": "எரிபொருள் இறக்குமதி மற்றும் விநியோகம்"}, "questions": [{"q": {"en": "Fuel availability?", "si": "ඉන්ධන තිබේද?", "ta": "எரிபொருள் கிடைக்குமா?"}, "answer": {"en": "Check CPC updates or fuel shed apps.", "si": "CPC යාවත්කාලීන කිරීම් හෝ ඉන්ධන මඩුවල යෙදුම් පරීක්ෂා කරන්න.", "ta": "CPC புதுப்பிப்புகள் அல்லது எரிபொருள் ஷெட் பயன்பாடுகளைச் சரிபார்க்கவும்."}}]},
-                {"id": "renewable", "name": {"en": "Renewable Energy Grants", "si": "පුනර්ජනනීය බලශක්ති ආධාර", "ta": "புதுப்பிக்கத்தக்க எரிசக்தி மானியங்கள்"}, "questions": [{"q": {"en": "Grant for solar panels?", "si": "සූර්ය පැනල සඳහා ආධාර?", "ta": "சூரிய சக்திக்கான மானியம்?"}, "answer": {"en": "Contact SLSEA for available solar schemes.", "si": "පවතින සූර්ය යෝජනා ක්‍රම සඳහා SLSEA අමතන්න.", "ta": "கிடைக்கக்கூடிய சூரிய திட்டங்களுக்கு SLSEA ஐ தொடர்பு கொள்ளவும்."}}]},
-                {"id": "utility", "name": {"en": "Utility Bill Management", "si": "බිල්පත් කළමනාකරණය", "ta": "மின்சார கட்டண மேலாண்மை"}, "questions": [{"q": {"en": "Pay bill online?", "si": "බිල මාර්ගගතව ගෙවනවාද?", "ta": "கட்டணத்தை ஆன்லைனில் செலுத்துவதா?"}, "answer": {"en": "Use CEB Care or LECO online portals.", "si": "CEB Care හෝ LECO මාර්ගගත ද්වාර භාවිතා කරන්න.", "ta": "CEB Care அல்லது LECO ஆன்லைன் போர்ட்டல்களைப் பயன்படுத்தவும்."}}]}
-            ]
+                {
+                    "id": "tin_reg",
+                    "name": {"en": "TIN Registration (Taxpayer ID)", "si": "බදු ගෙවන්නා හඳුනාගැනීමේ අංකය"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to register for a TIN number online?"},
+                            "answer": {"en": "Use the IRD e-Services portal to register for a TIN. It is mandatory for all citizens over 18."},
+                            "location": "https://eservices.ird.gov.lk/Registration/TINRegistration",
+                            "verified_source": True,
+                            "eligibility": "Any citizen over 18 or Registered Business",
+                            "processing_time": "Instant via e-Services",
+                            "supporting_docs": ["NIC Copy (both sides)", "Proof of billing address"],
+                            "downloads": ["/static/docs/TIN-Application.pdf"]  # Official IRD TIN form TPR_002_E
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
         },
         {
             "id": "ministry_public",
-            "name": {"en": "Ministry of Public Administration", "si": "රාජ්‍ය පරිපාලන අමාත්‍යාංශය", "ta": "பொது நிர்வாக அமைச்சு"},
-            "contact": {"phone": "0112 696 211", "email": "info@pubad.gov.lk"},
-            "links": [{"title": {"en": "Public Admin Website", "si": "රාජ්‍ය පරිපාලන අමාත්‍යාංශය", "ta": "பொது நிர்வாக அமைச்சு"}, "url": "http://www.pubad.gov.lk/"}],
+            "category": "cat_public",
+            "name": {"en": "Sri Lanka Police & Public Services", "si": "ශ්‍රී ලංකා පොලිසිය සහ රාජ්‍ය සේවා", "ta": "இலங்கை பொலிஸ் மற்றும் பொது சேவைகள்"},
             "subservices": [
-                {"id": "admin", "name": {"en": "District/Divisional Admin", "si": "දිස්ත්‍රික්/ප්‍රාදේශීය පරිපාලනය", "ta": "மாவட்ட/பிரதேச நிர்வாகம்"}, "questions": [{"q": {"en": "Who is my Divisional Secretary?", "si": "මගේ ප්‍රාදේශීය ලේකම් කවුද?", "ta": "எனது பிரதேச செயலாளர் யார்?"}, "answer": {"en": "Search by region on the ministry website.", "si": "අමාත්‍යාංශ වෙබ් අඩවියේ කලාපය අනුව සොයන්න.", "ta": "அமைச்சின் இணையதளத்தில் பிராந்தியம் வாரியாக தேடவும்."}}]},
-                {"id": "certificates", "name": {"en": "Birth/Marriage Certificates", "si": "උප්පැන්න/විවාහ සහතික", "ta": "பிறப்பு/திருமண சான்றிதழ்கள்"}, "questions": [{"q": {"en": "How to get a copy of birth cert?", "si": "උප්පැන්න සහතිකයේ පිටපතක් ලබා ගන්නේ කෙසේද?", "ta": "பிறப்புச் சான்றிதழின் நகலை எவ்வாறு பெறுவது?"}, "answer": {"en": "Apply at the local Divisional Secretariat.", "si": "ප්‍රාදේශීය ලේකම් කාර්යාලයේ අයදුම් කරන්න.", "ta": "உள்ளூர் பிரதேச செயலகத்தில் விண்ணப்பிக்கவும்."}}]},
-                {"id": "pensions", "name": {"en": "Pensions Administration", "si": "විශ්‍රාම වැටුප් පරිපාලනය", "ta": "ஓய்வூதிய நிர்வாகம்"}, "questions": [{"q": {"en": "Pension status check?", "si": "විශ්‍රාම වැටුප් තත්ත්වය පරීක්ෂා කිරීම?", "ta": "ஓய்வூதிய நிலை சரிபார்ப்பு?"}, "answer": {"en": "Use the Department of Pensions online portal.", "si": "විශ්‍රාම වැටුප් දෙපාර්තමේන්තු මාර්ගගත ද්වාරය භාවිතා කරන්න.", "ta": "ஓய்வூதியத் துறை ஆன்லைன் போர்ட்டலைப் பயன்படுத்தவும்."}}]},
-                {"id": "grama", "name": {"en": "Grama Niladhari Services", "si": "ග්‍රාම නිලධාරී සේවා", "ta": "கிராம நிலதாரி சேவைகள்"}, "questions": [{"q": {"en": "Need GN character cert?", "si": "ග්‍රාම නිලධාරී චරිත සහතිකය අවශ්‍යද?", "ta": "கிராம நிலதாரி நடத்தை சான்றிதழ் வேண்டுமா?"}, "answer": {"en": "Contact your local GN with identity proof.", "si": "අනන්‍යතා සාධක සමඟ ඔබේ ප්‍රාදේශීය ග්‍රාම නිලධාරී අමතන්න.", "ta": "அடையாளச் சான்றுடன் உங்கள் உள்ளூர் கிராம நிலதாரியைத் தொடர்பு கொள்ளவும்."}}]}
-            ]
+                {
+                    "id": "police_clearance",
+                    "name": {"en": "Police Clearance Certificate", "si": "පොලිස් නිෂ්කාශන සහතිකය"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to apply for a Police Clearance Certificate online?"},
+                            "answer": {"en": "Apply through the official Sri Lanka Police e-Services portal. Required for visas and foreign employment."},
+                            "location": "https://www.police.lk/index.php/clearance-certificate/",
+                            "verified_source": True,
+                            "eligibility": "Sri Lankan Citizens and foreigners who resided in Sri Lanka",
+                            "processing_time": "14 Working Days",
+                            "supporting_docs": ["NIC Copy", "Valid Passport Copy", "Application Form"],
+                            "downloads": ["/static/docs/Police-Clearance.pdf"]  # Official Sri Lanka Police form
+                        }
+                    ]
+                },
+                {
+                    "id": "pension",
+                    "name": {"en": "Department of Pensions", "si": "විශ්‍රාම වැටුප් දෙපාර්තමේන්තුව"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to check my pension status?"},
+                            "answer": {"en": "Log into the Department of Pensions portal using your Pension ID."},
+                            "location": "https://www.pensions.gov.lk/",
+                            "verified_source": True,
+                            "processing_time": "Instant lookup",
+                            "supporting_docs": ["Pension ID number"]
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
         },
         {
-            "id": "ministry_defence",
-            "name": {"en": "Ministry of Defence", "si": "ආරක්ෂක අමාත්‍යාංශය", "ta": "பாதுகாப்பு அமைச்சு"},
-            "contact": {"phone": "0112 430 860", "email": "info@defence.lk"},
-            "links": [{"title": {"en": "Defence Website", "si": "ආරක්ෂක අමාත්‍යාංශය", "ta": "பாதுகாப்பு அமைச்சு"}, "url": "http://www.defence.lk/"}],
+            "id": "ministry_land",
+            "category": "cat_land",
+            "name": {"en": "Land Registry & Survey Department", "si": "ඉඩම් ලියාපදිංචි කිරීමේ දෙපාර්තමේන්තුව", "ta": "காணிப் பதிவாளர் திணைக்களம்"},
             "subservices": [
-                {"id": "security", "name": {"en": "National Security", "si": "ජාතික ආරක්ෂාව", "ta": "தேசிய பாதுகாப்பு"}, "questions": [{"q": {"en": "Latest security updates?", "si": "නවතම ආරක්ෂක තොරතුරු?", "ta": "சமீபத்திய பாதுகாப்பு புதுப்பிப்புகள்?"}, "answer": {"en": "Follow the official MOD news portal.", "si": "නිල MOD පුවත් ද්වාරය අනුගමනය කරන්න.", "ta": "அதிகாரப்பூர்வ MOD செய்தி போர்ட்டலைப் பின்தொடரவும்."}}]},
-                {"id": "civil", "name": {"en": "Civil Defense", "si": "සිවිල් ආරක්ෂාව", "ta": "சிவில் பாதுகாப்பு"}, "questions": [{"q": {"en": "Civil Defense services?", "si": "සිවිල් ආරක්ෂක සේවා?", "ta": "சிவில் பாதுகாப்பு சேவைகள்?"}, "answer": {"en": "Refer to the CSD official website.", "si": "CSD නිල වෙබ් අඩවිය බලන්න.", "ta": "CSD அதிகாரப்பூர்வ வலைத்தளத்தைப் பார்க்கவும்."}}]},
-                {"id": "coast", "name": {"en": "Coast Guard Monitoring", "si": "වෙරළාරක්ෂක නිරීක්ෂණ", "ta": "கடலோர காவல்படை கண்காணிப்பு"}, "questions": [{"q": {"en": "Report sea pollution?", "si": "මුහුදු දූෂණය වාර්තා කරනවාද?", "ta": "கடல் மாசுபாட்டைப் புகாரளிப்பதா?"}, "answer": {"en": "Notify Sri Lanka Coast Guard immediately.", "si": "වහාම ශ්‍රී ලංකා වෙරළාරක්ෂක බලකායට දන්වන්න.", "ta": "இலங்கை கடலோர காவல்படைக்கு உடனடியாக அறிவிக்கவும்."}}]},
-                {"id": "immigration", "name": {"en": "Immigration & Emigration", "si": "ආගමන හා විගමන", "ta": "குடிவரவு மற்றும் குடியகல்வு"}, "questions": [{"q": {"en": "Apply for visa?", "si": "වීසා සඳහා අයදුම් කරනවාද?", "ta": "விசாவிற்கு விண்ணப்பிப்பதா?"}, "answer": {"en": "Visit immigration.gov.lk or eta.gov.lk.", "si": "immigration.gov.lk හෝ eta.gov.lk වෙත පිවිසෙන්න.", "ta": "immigration.gov.lk அல்லது eta.gov.lk ஐப் பார்வையிடவும்."}}]}
-            ]
+                {
+                    "id": "land_title",
+                    "name": {"en": "Title Registration & Search", "si": "ඔප්පු ලියාපදිංචිය සහ සෙවීම"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to obtain a certified copy of a deed?"},
+                            "answer": {"en": "Submit a request to your district Land Registry with the relevant folio numbers and stamps."},
+                            "location": "https://rgd.gov.lk",
+                            "verified_source": True,
+                            "eligibility": "Property Owners or Authorized Representatives",
+                            "processing_time": "1-2 Weeks",
+                            "supporting_docs": ["Folio/Deed Number Details", "NIC"]
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
         },
         {
-            "id": "ministry_justice",
-            "name": {"en": "Ministry of Justice", "si": "අධිකරණ අමාත්‍යාංශය", "ta": "நீதி அமைச்சு"},
-            "contact": {"phone": "0112 323 026", "email": "info@justice.gov.lk"},
-            "links": [{"title": {"en": "Justice Ministry", "si": "අධිකරණ අමාත්‍යාංශය", "ta": "நீதி அமைச்சு"}, "url": "http://www.justice.gov.lk/"}],
+            "id": "ministry_it",
+            "category": "cat_it",
+            "name": {"en": "Information and Communication Technology Agency", "si": "තොරතුරු හා සන්නිවේදන තාක්ෂණ නියෝජිතායතනය", "ta": "தகவல் மற்றும் தொடர்பு தொழில்நுட்ப நிறுவனம்"},
             "subservices": [
-                {"id": "legal_infra", "name": {"en": "Legal Infrastructure", "si": "නීතිමය යටිතල පහසුකම්", "ta": "சட்ட உள்கட்டமைப்பு"}, "questions": [{"q": {"en": "Where is the court located?", "si": "උසාවිය පිහිටා ඇත්තේ කොහේද?", "ta": "நீதிமன்றம் எங்கே அமைந்துள்ளது?"}, "answer": {"en": "Search the court directory on the ministry website.", "si": "අමාත්‍යාංශ වෙබ් අඩවියේ උසාවි නාමාවලිය සොයන්න.", "ta": "அமைச்சின் இணையதளத்தில் நீதிமன்ற விபரங்களைத் தேடவும்."}}]},
-                {"id": "mediation", "name": {"en": "Mediation Boards", "si": "සමථ මණ්ඩල", "ta": "சமரச சபைகள்"}, "questions": [{"q": {"en": "How to file a mediation case?", "si": "සමථකරණ නඩුවක් ගොනු කරන්නේ කෙසේද?", "ta": "சமரசம் செய்வது எப்படி?"}, "answer": {"en": "Visit your local Mediation Board office.", "si": "ඔබේ ප්‍රාදේශීය සමථ මණ්ඩල කාර්යාලයට පැමිණෙන්න.", "ta": "உங்கள் உள்ளூர் சமரச சபையின் அலுவலகத்தைப் பார்வையிடவும்."}}]},
-                {"id": "ag_services", "name": {"en": "Attorney General Services", "si": "නීතිපති සේවා", "ta": "சட்டமா அதிபர் சேவைகள்"}, "questions": [{"q": {"en": "Role of AG?", "si": "නීතිපතිගේ කාර්යභාරය?", "ta": "சட்டமா அதிபரின் பங்கு?"}, "answer": {"en": "The AG acts as the chief legal advisor to the state.", "si": "නීතිපතිවරයා රජයේ ප්‍රධාන නීති උපදේශකවරයා ලෙස කටයුතු කරයි.", "ta": "சட்டமா அதிபர் அரசின் தலைமை சட்ட ஆலோசகராக செயல்படுகிறார்."}}]},
-                {"id": "legal_aid", "name": {"en": "Legal Aid for Citizens", "si": "පුරවැසියන් සඳහා නීති ආධාර", "ta": "குடிமக்களுக்கான சட்ட உதவி"}, "questions": [{"q": {"en": "Free legal consultation?", "si": "නොමිලේ නීති උපදෙස්?", "ta": "இலவச சட்ட ஆலோசனை?"}, "answer": {"en": "Contact the Legal Aid Commission.", "si": "නීති ආධාර කොමිෂන් සභාව අමතන්න.", "ta": "சட்ட உதவி ஆணைக்குழுவைத் தொடர்பு கொள்ளவும்."}}]}
-            ]
+                {
+                    "id": "digital_id",
+                    "name": {"en": "Lanka Gate e-Services", "si": "ලංකා ගේට් ඊ-සේවා", "ta": "லங்கா கேட் இ-சேவைகள்"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to access government e-Services online?", "si": "රජයේ ඊ-සේවා මාර්ගගතව ලබා ගන්නේ කෙසේද?"},
+                            "answer": {"en": "Register through the Lanka Gate portal (srilanka.lk) to access hundreds of government digital services from a single account."},
+                            "location": "https://www.srilanka.lk",
+                            "downloads": [],
+                            "verified_source": True,
+                            "eligibility": "All Sri Lankan Citizens",
+                            "processing_time": "Instant Registration",
+                            "supporting_docs": ["NIC", "Valid Email", "Mobile Number"]
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
         },
         {
-            "id": "ministry_industries",
-            "name": {"en": "Ministry of Industries", "si": "කර්මාන්ත අමාත්‍යාංශය", "ta": "தொழில் அமைச்சு"},
-            "contact": {"phone": "0112 392 149", "email": "info@industry.gov.lk"},
-            "links": [{"title": {"en": "Industry Website", "si": "කර්මාන්ත අමාත්‍යාංශය", "ta": "தொழில் அமைச்சு"}, "url": "http://www.industry.gov.lk/"}],
+            "id": "ministry_education",
+            "category": "cat_education",
+            "name": {"en": "Ministry of Education", "si": "අධ්‍යාපන අමාත්‍යාංශය", "ta": "கல்வி அமைச்சு"},
             "subservices": [
-                {"id": "sme", "name": {"en": "SME Support & Grants", "si": "SME සහාය සහ ආධාර", "ta": "சிறு நடுத்தர தொழில் ஆதரவு மற்றும் மானியங்கள்"}, "questions": [{"q": {"en": "How to get a startup grant?", "si": "ආරම්භක ආධාර ලබා ගන්නේ කෙසේද?", "ta": "தொடக்க மானியத்தை எவ்வாறு பெறுவது?"}, "answer": {"en": "Apply via the SME development division.", "si": "SME සංවර්ධන අංශය හරහා අයදුම් කරන්න.", "ta": "சிறு நடுத்தர தொழில் வளர்ச்சிப் பிரிவு மூலம் விண்ணப்பிக்கவும்."}}]},
-                {"id": "industrial_parks", "name": {"en": "Industrial Park Management", "si": "කර්මාන්ත උද්‍යාන කළමනාකරණය", "ta": "தொழில் பூங்கா மேலாண்மை"}, "questions": [{"q": {"en": "Lease land for factory?", "si": "කර්මාන්ත ශාලාවකට ඉඩම් බදු දෙනවාද?", "ta": "தொழிற்சாலைக்கு நிலத்தை குத்தகைக்கு விடுவதா?"}, "answer": {"en": "Contact the Industrial Development Board.", "si": "කර්මාන්ත සංවර්ධන මණ්ඩලය අමතන්න.", "ta": "தொழில் மேம்பாட்டு வாரியத்தை தொடர்பு கொள்ளவும்."}}]},
-                {"id": "entrepreneur", "name": {"en": "Entrepreneur Training", "si": "ව්‍යවසායක පුහුණුව", "ta": "தொழில்முனைவோர் பயிற்சி"}, "questions": [{"q": {"en": "Available training programs?", "si": "පවතින පුහුණු වැඩසටහන්?", "ta": "கிடைக்கக்கூடிய பயிற்சி திட்டங்கள்?"}, "answer": {"en": "Register for courses at IDB or SLSI.", "si": "IDB හෝ SLSI හි පාඨමාලා සඳහා ලියාපදිංචි වන්න.", "ta": "IDB அல்லது SLSI இல் படிப்புகளுக்கு பதிவு செய்யவும்."}}]},
-                {"id": "standards", "name": {"en": "Standards & Licensing", "si": "ප්‍රමිති සහ බලපත්‍ර ලබා දීම", "ta": "தரநிலைகள் மற்றும் உரிமம்"}, "questions": [{"q": {"en": "How to get SLS mark?", "si": "SLS ලකුණ ලබා ගන්නේ කෙසේද?", "ta": "SLS முத்திரையை எவ்வாறு பெறுவது?"}, "answer": {"en": "Apply at Sri Lanka Standards Institution.", "si": "ශ්‍රී ලංකා ප්‍රමිති ආයතනයට අයදුම් කරන්න.", "ta": "இலங்கை தரநிர்ணய நிறுவனத்தில் விண்ணப்பிக்கவும்."}}]}
-            ]
+                {
+                    "id": "school_admission",
+                    "name": {"en": "School Admissions", "si": "පාසල් ප්‍රවේශය", "ta": "பாடசாலை அனுமதி"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to apply for Grade 1 admission in a government school?", "si": "රජයේ පාසලක පළමු ශ්‍රේණියට ඇතුළත් වීමට අයදුම් කරන්නේ කෙසේද?"},
+                            "answer": {"en": "Submit the standardized application form to the school principal before the annual deadline published by the Ministry of Education."},
+                            "location": "https://moe.gov.lk",
+                            "downloads": ["/static/docs/Grade1-Admission-Si.pdf", "/static/docs/Grade1-Admission-Ta.pdf"],
+                            "verified_source": True,
+                            "eligibility": "Children turning 5 years of age by January 31st of the admission year",
+                            "processing_time": "Annual cycle (June-August applications)",
+                            "supporting_docs": ["Birth Certificate", "Proof of Residence (Deed/Lease)", "Electoral Register Extracts"]
+                        }
+                    ]
+                },
+                {
+                    "id": "exam_results",
+                    "name": {"en": "Department of Examinations", "si": "විභාග දෙපාර්තමේන්තුව", "ta": "பரீட்சை திணைக்களம்"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to check G.C.E. O/L and A/L results online?"},
+                            "answer": {"en": "Visit the official Department of Examinations portal and enter your Index Number or NIC to view results."},
+                            "location": "https://www.doenets.lk",
+                            "downloads": [],
+                            "verified_source": True,
+                            "eligibility": "Registered Candidates",
+                            "processing_time": "Instant lookup",
+                            "supporting_docs": ["Index Number", "NIC"]
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
         },
         {
-            "id": "ministry_tourism",
-            "name": {"en": "Ministry of Tourism", "si": "සංචාරක අමාත්‍යාංශය", "ta": "சுற்றுலா அமைச்சு"},
-            "contact": {"phone": "0112 437 055", "email": "info@tourismmin.gov.lk"},
-            "links": [{"title": {"en": "Tourism Ministry", "si": "සංචාරක අමාත්‍යාංශය", "ta": "சுற்றுலா அமைச்சு"}, "url": "http://www.tourismmin.gov.lk/"}],
+            "id": "ministry_health",
+            "category": "cat_health",
+            "name": {"en": "Ministry of Health", "si": "සෞඛ්‍ය අමාත්‍යාංශය", "ta": "சுகாதார அமைச்சு"},
             "subservices": [
-                {"id": "police", "name": {"en": "Tourist Police Services", "si": "සංචාරක පොලිස් සේවා", "ta": "சுற்றுலா பொலிஸ் சேவைகள்"}, "questions": [{"q": {"en": "Emergency contact for tourists?", "si": "සංචාරකයින් සඳහා හදිසි ඇමතුම් අංකය?", "ta": "சுற்றுலாப் பயணிகளுக்கான அவசர தொடர்பு எண்?"}, "answer": {"en": "Call 1912 for tourist assistance.", "si": "සංචාරක සහාය සඳහා 1912 අමතන්න.", "ta": "சுற்றுலா உதவிக்கு 1912 ஐ அழைக்கவும்."}}]},
-                {"id": "licensing", "name": {"en": "Hotel Licensing", "si": "හෝටල් බලපත්‍ර ලබා දීම", "ta": "ஹோட்டல் உரிமம்"}, "questions": [{"q": {"en": "How to register a homestay?", "si": "homestay එකක් ලියාපදිංචි කරන්නේ කෙසේද?", "ta": "ஹோம்ஸ்டேவை எவ்வாறு பதிவு செய்வது?"}, "answer": {"en": "Register via the SLTDA portal.", "si": "SLTDA ද්වාරය හරහා ලියාපදිංචි වන්න.", "ta": "SLTDA போர்டல் மூலம் பதிவு செய்யவும்."}}]},
-                {"id": "marketing", "name": {"en": "Destination Marketing", "si": "සංචාරක ප්‍රවර්ධනය", "ta": "இலக்கு சந்தைப்படுத்தல்"}, "questions": [{"q": {"en": "Where to find travel guides?", "si": "සංචාරක මාර්ගෝපදේශ සොයා ගන්නේ කොහෙන්ද?", "ta": "சுற்றுலா வழிகாட்டிகளை எங்கே காணலாம்?"}, "answer": {"en": "Check srilanka.travel for official info.", "si": "නිල තොරතුරු සඳහා srilanka.travel පරීක්ෂා කරන්න.", "ta": "அதிகாரப்பூர்வ தகவலுக்கு srilanka.travel ஐப் பார்க்கவும்."}}]},
-                {"id": "certification_guide", "name": {"en": "Travel Guide Certification", "si": "සංචාරක මාර්ගෝපදේශක සහතික කිරීම", "ta": "பயண வழிகாட்டி சான்றிதழ்"}, "questions": [{"q": {"en": "Apply for guide license?", "si": "මාර්ගෝපදේශක බලපත්‍රය සඳහා අයදුම් කරනවාද?", "ta": "வழிகாட்டி உரிமத்திற்கு விண்ணப்பிப்பதா?"}, "answer": {"en": "Follow the SLTDA training and exam process.", "si": "SLTDA පුහුණු හා විභාග ක්‍රියාවලිය අනුගමනය කරන්න.", "ta": "SLTDA பயிற்சி மற்றும் தேர்வு செயல்முறையைப் பின்பற்றவும்."}}]}
-            ]
+                {
+                    "id": "ambulance",
+                    "name": {"en": "1990 Suwa Seriya Ambulance", "si": "1990 සුව සැරිය ගිලන් රථ සේවාව", "ta": "1990 சுவ செரிய நோயாளர் காவு வண்டி"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to call a government ambulance in an emergency?", "si": "හදිසි අවස්ථාවකදී රජයේ ගිලන් රථයක් අමතන්නේ කෙසේද?"},
+                            "answer": {"en": "Dial 1990 toll-free from any network for emergency pre-hospital care transport to the nearest government hospital."},
+                            "location": "https://www.health.gov.lk",
+                            "downloads": [],
+                            "verified_source": True,
+                            "eligibility": "Any person needing emergency medical transport",
+                            "processing_time": "Immediate dispatch (Average response time 11 mins)",
+                            "supporting_docs": ["None required during emergency"]
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "ministry_agriculture",
+            "category": "cat_agriculture",
+            "name": {"en": "Department of Agrarian Development", "si": "ගොවිජන සංවර්ධන දෙපාර්තමේන්තුව", "ta": "விவசாய அபிவிருத்தி திணைக்களம்"},
+            "subservices": [
+                {
+                    "id": "fertilizer",
+                    "name": {"en": "Fertilizer Subsidy Scheme", "si": "පොහොර සහනාධාර ක්‍රමය", "ta": "உர மானியத் திட்டம்"},
+                    "questions": [
+                        {
+                            "q": {"en": "How to apply for the government fertilizer subsidy?", "si": "රජයේ පොහොර සහනාධාරය සඳහා අයදුම් කරන්නේ කෙසේද?"},
+                            "answer": {"en": "Register your cultivation details with the regional Agrarian Services Center. Subsidy will be directly credited to your bank account."},
+                            "location": "https://www.agrimin.gov.lk",
+                            "downloads": [],
+                            "verified_source": True,
+                            "eligibility": "Registered farmers cultivating Paddy or specific cash crops",
+                            "processing_time": "Seasonal (Maha/Yala)",
+                            "supporting_docs": ["Farmer ID (Govi ID)", "Land Ownership/Cultivation Proof", "Bank Account Details"]
+                        }
+                    ]
+                }
+            ],
+            "created": datetime.now(timezone.utc)
         }
     ]
+    try:
+        services_col.insert_many(services, ordered=False)
+        print(f"✓ Seeded {len(services)} services with subservices")
+    except errors.BulkWriteError as bwe:
+        print("Note: some services may already exist or had duplicate keys. BulkWriteError:", bwe.details)
+    except Exception as e:
+        print(f"Failed to seed services: {e}", file=sys.stderr)
 
-    services_col.insert_many(docs)
-    print(f"Seeded {len(docs)} ministries with EXACT requested hierarchical structure.")
-    
-    # 3. Ensure Admin exists
-    admin_pwd = "admin123"
-    admins_col.update_one(
-        {"username": "admin"},
-        {"$set": {"password": admin_pwd, "role": "superadmin"}},
-        upsert=True
-    )
-    print("Admin 'admin' verified with password 'admin123'.")
+def seed_officers():
+    print("\n[4/7] Seeding officers...")
+    officers = [
+        {
+            "id": "off_it_01",
+            "name": "Ms. Nayana Perera",
+            "role": "Director - Digital Services",
+            "ministry_id": "ministry_it",
+            "contact": {"email": "nayana@it.gov.lk", "phone": "+94 71 234 5678"},
+            "office_hours": "Mon-Fri, 9:00 AM - 4:00 PM",
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "off_edu_01",
+            "name": "Mr. Ruwan Silva",
+            "role": "Assistant Secretary - Education",
+            "ministry_id": "ministry_education",
+            "contact": {"email": "ruwan@edu.gov.lk", "phone": "+94 71 987 6543"},
+            "created": datetime.now(timezone.utc)
+        }
+    ]
+    try:
+        officers_col.insert_many(officers, ordered=False)
+        print(f"✓ Seeded {len(officers)} officers")
+    except errors.BulkWriteError as bwe:
+        print("Note: some officers may already exist. BulkWriteError:", bwe.details)
+    except Exception as e:
+        print(f"Failed to seed officers: {e}", file=sys.stderr)
+
+def seed_ads():
+    print("\n[5/7] Seeding ads and announcements...")
+    ads = [
+        # --- OFFICIAL GOVERNMENT ANNOUNCEMENTS (Citizen-Targeted) ---
+        {
+            "id": "ad_nic_renewal",
+            "title": "NIC Renewal Reminder - Smart NIC Available",
+            "body": "The Department for Registration of Persons now issues the Smart National Identity Card. Apply for renewal or a new NIC online via the official portal.",
+            "link": "https://drp.gov.lk",
+            "link_label": "Apply at DRP Portal",
+            "link_type": "external",
+            "active": True,
+            "priority": "high",
+            "tags": ["nic", "identity", "documents", "government"],
+            "target_segments": ["young_adult", "all_citizens"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=365)
+        },
+        {
+            "id": "ad_passport_eappointment",
+            "title": "Apply for Passports Online - New System",
+            "body": "The Department of Immigration and Emigration has launched a new online portal for passport applications. Apply from home and get your appointment integrated with the application process.",
+            "link": "https://eservices.immigration.gov.lk/onlinetd/OnlineTD/",
+            "link_label": "Apply Online Now",
+            "link_type": "external",
+            "active": True,
+            "priority": "high",
+            "tags": ["passport", "immigration", "travel", "overseas"],
+            "target_segments": ["overseas_interested", "young_adult", "early_career"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=365)
+        },
+        {
+            "id": "ad_grade1_admission",
+            "title": "Grade 1 Admissions 2026 - Applications Open",
+            "body": "Applications for Grade 1 admission to government schools for 2026 are now open. Submit to the school principal before the Ministry deadline.",
+            "link": "https://moe.gov.lk",
+            "link_label": "Ministry of Education",
+            "link_type": "external",
+            "active": True,
+            "priority": "high",
+            "tags": ["school", "education", "grade1", "admission", "children"],
+            "target_segments": ["parent", "secondary_school_parent", "family"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=180)
+        },
+        {
+            "id": "ad_tin_registration",
+            "title": "TIN Registration Now Mandatory for All Citizens Over 18",
+            "body": "The Inland Revenue Department requires all citizens over 18 to register for a Taxpayer Identification Number (TIN). Register free via e-Services.",
+            "link": "https://eservices.ird.gov.lk/Registration/TINRegistration",
+            "link_label": "Register TIN Online (IRD)",
+            "link_type": "external",
+            "active": True,
+            "priority": "high",
+            "tags": ["tin", "tax", "ird", "finance", "registration"],
+            "target_segments": ["government_employee", "mid_career_family", "early_career"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=365)
+        },
+        {
+            "id": "ad_police_clearance",
+            "title": "Police Clearance Certificate - Online Application",
+            "body": "Sri Lanka Police now accepts online applications for Police Clearance Certificates required for foreign employment and visa applications.",
+            "link": "https://www.police.lk/?page_id=907",
+            "link_label": "Apply at Police e-Services",
+            "link_type": "external",
+            "active": True,
+            "priority": "medium",
+            "tags": ["police", "clearance", "overseas", "visa", "employment"],
+            "target_segments": ["overseas_interested", "young_adult", "early_career"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=365)
+        },
+        {
+            "id": "ad_suwa_seriya",
+            "title": "1990 Suwa Seriya - Free Emergency Ambulance",
+            "body": "Call 1990 toll-free for emergency ambulance service available 24/7 across Sri Lanka. Service is completely free for all citizens.",
+            "link": "https://www.health.gov.lk",
+            "link_label": "Ministry of Health",
+            "link_type": "external",
+            "active": True,
+            "priority": "high",
+            "tags": ["health", "ambulance", "emergency", "free"],
+            "target_segments": ["all_citizens", "elderly", "family"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=730)
+        },
+        {
+            "id": "ad_fertilizer_subsidy",
+            "title": "Fertilizer Subsidy Scheme - Maha Season Registration",
+            "body": "Registered paddy farmers can apply for the government fertilizer subsidy at their regional Agrarian Services Center. Subsidy credited directly to your bank.",
+            "link": "https://www.agrimin.gov.lk",
+            "link_label": "Department of Agriculture",
+            "link_type": "external",
+            "active": True,
+            "priority": "medium",
+            "tags": ["agriculture", "fertilizer", "subsidy", "farmers", "paddy"],
+            "target_segments": ["farmer", "rural", "agriculture"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=180)
+        },
+        {
+            "id": "ad_eservices_lanka",
+            "title": "Lanka Gate - All Government Services Online",
+            "body": "Access 200+ government services through a single digital account at srilanka.lk. Save time with online applications, payments and tracking.",
+            "link": "https://www.srilanka.lk",
+            "link_label": "Visit Lanka Gate",
+            "link_type": "external",
+            "active": True,
+            "priority": "medium",
+            "tags": ["digital", "eservices", "online", "government"],
+            "target_segments": ["tech_professional", "young_adult", "government_employee"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=730)
+        },
+        {
+            "id": "ad_al_university",
+            "title": "University Admissions for A/L Students",
+            "body": "Applications for the upcoming university intake are now open for all A/L students. Apply online.",
+            "link": "https://ugc.ac.lk/",
+            "link_label": "Apply Online",
+            "link_type": "external",
+            "active": True,
+            "priority": "high",
+            "tags": ["education", "university"],
+            "target_segments": ["student", "al", "education"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=180)
+        },
+        {
+            "id": "ad_business_tax",
+            "title": "SME Tax Exemptions",
+            "body": "Small and Medium Enterprises can now apply for the new digital tax exemption scheme.",
+            "link": "http://www.ird.gov.lk/",
+            "link_label": "Apply Online",
+            "link_type": "external",
+            "active": True,
+            "priority": "high",
+            "tags": ["business", "tax"],
+            "target_segments": ["business", "sme", "entrepreneur"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=365)
+        },
+        {
+            "id": "ad_doctor_health",
+            "title": "Advanced Medical Equipment Grants",
+            "body": "Special government grants are available for medical professionals and clinics to upgrade their equipment.",
+            "link": "https://www.health.gov.lk/",
+            "link_label": "Apply Online",
+            "link_type": "external",
+            "active": True,
+            "priority": "medium",
+            "tags": ["health", "medical"],
+            "target_segments": ["doctor", "health", "medical"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=365)
+        },
+        {
+            "id": "ad_teacher_training",
+            "title": "National Teacher Training Program",
+            "body": "Enroll in the upcoming national teacher training workshops for digital classroom tools.",
+            "link": "https://moe.gov.lk/",
+            "link_label": "Enroll Now",
+            "link_type": "external",
+            "active": True,
+            "priority": "medium",
+            "tags": ["education", "teacher"],
+            "target_segments": ["teacher", "education", "school"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=180)
+        },
+        {
+            "id": "ad_engineer_projects",
+            "title": "Public Works Tenders Opened",
+            "body": "The Ministry of Engineering Services has opened new tenders for infrastructure development.",
+            "link": "https://www.treasury.gov.lk/",
+            "link_label": "View Tenders",
+            "link_type": "external",
+            "active": True,
+            "priority": "high",
+            "tags": ["construction", "infrastructure"],
+            "target_segments": ["engineer", "construction", "infrastructure"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=365)
+        },
+        {
+            "id": "ad_general_update",
+            "title": "Citizen Digital ID Rollout",
+            "body": "The new digital citizen ID card applications are now open for everyone. Update your profile.",
+            "link": "https://drp.gov.lk/",
+            "link_label": "Update Profile",
+            "link_type": "external",
+            "active": True,
+            "priority": "medium",
+            "tags": ["digital", "id"],
+            "target_segments": ["other", "all_citizens"],
+            "created": datetime.now(timezone.utc),
+            "end_date": datetime.now(timezone.utc) + timedelta(days=365)
+        }
+    ]
+    try:
+        ads_col.insert_many(ads, ordered=False)
+        print(f"✓ Seeded {len(ads)} ads")
+    except errors.BulkWriteError as bwe:
+        print("Note: some ads may already exist. BulkWriteError:", bwe.details)
+    except Exception as e:
+        print(f"Failed to seed ads: {e}", file=sys.stderr)
+
+def seed_products():
+    print("\n[6/7] Seeding products...")
+    products = [
+        {
+            "id": "prod_degree_01",
+            "name": "National IT Degree Program (BIT) - Semester 1 Fee",
+            "category": "education",
+            "subcategory": "degree_programs",
+            "price": 65000,
+            "original_price": 75000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Complete your IT degree with flexible payment options. Weekend classes available. Industry-recognized curriculum with government employee discount.",
+            "features": [
+                "3-year program with semester system",
+                "Weekend classes (Saturday & Sunday)",
+                "Online learning support",
+                "Government employee 20% discount",
+                "Industry certification included",
+                "Job placement assistance"
+            ],
+            "tags": ["degree", "it", "government", "career_advancement", "weekend"],
+            "target_segments": ["government_employee", "needs_qualification", "mid_career_family", "tech_professional"],
+            "in_stock": True,
+            "delivery_options": ["online", "campus"],
+            "rating": 4.5,
+            "reviews_count": 47,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_ielts_01",
+            "name": "Global Language Certification Prep (IELTS)",
+            "category": "education",
+            "subcategory": "language_courses",
+            "price": 25000,
+            "original_price": 35000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Comprehensive IELTS preparation with experienced trainers. Includes mock tests, speaking practice, and study materials.",
+            "features": [
+                "4-week intensive program",
+                "Expert British Council certified trainers",
+                "5 full mock tests",
+                "Daily speaking practice sessions",
+                "Study materials included",
+                "Small batch size (max 15 students)"
+            ],
+            "tags": ["ielts", "english", "overseas", "language", "government"],
+            "target_segments": ["young_adult", "early_career", "overseas_interested", "government_employee"],
+            "in_stock": True,
+            "delivery_options": ["online", "classroom"],
+            "rating": 4.7,
+            "reviews_count": 89,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_japan_visa_01",
+            "name": "Official Overseas Employment Support (Japan)",
+            "category": "visa_services",
+            "subcategory": "job_visas",
+            "price": 45000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Complete assistance for Japan work visa applications. IT, healthcare, and hospitality opportunities available.",
+            "features": [
+                "Complete visa processing",
+                "Job matching with Japanese employers",
+                "Document preparation and translation",
+                "Interview preparation",
+                "Pre-departure orientation",
+                "Post-arrival support"
+            ],
+            "tags": ["japan", "work_visa", "overseas_jobs", "it_jobs", "healthcare"],
+            "target_segments": ["early_career", "mid_career_family", "tech_professional", "young_adult"],
+            "in_stock": True,
+            "delivery_options": ["consultation"],
+            "rating": 4.3,
+            "reviews_count": 34,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_laptop_01",
+            "name": "Subsidy Digital Workspace Laptop (Dell) - Initial Installment",
+            "category": "education",
+            "subcategory": "computers",
+            "price": 35000,
+            "original_price": 45000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Premium laptop package for students and government employees with extended warranty and free software.",
+            "features": [
+                "Intel Core i5 11th Gen processor",
+                "8GB RAM (upgradeable to 16GB)",
+                "256GB SSD",
+                "15.6\" FHD display",
+                "2-year warranty",
+                "Free MS Office license",
+                "Free antivirus (1 year)"
+            ],
+            "tags": ["laptop", "electronics", "government_deal", "technology", "dell"],
+            "target_segments": ["government_employee", "early_career", "mid_career_family", "tech_professional"],
+            "in_stock": True,
+            "delivery_options": ["delivery", "pickup"],
+            "rating": 4.4,
+            "reviews_count": 156,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_craft_course",
+            "name": "Traditional Handloom & Batik Craft Certification",
+            "category": "training",
+            "subcategory": "skills_development",
+            "price": 8500,
+            "original_price": 12000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Vocational course on traditional Sri Lankan handloom and batik designs. Certified by Ministry of Industries.",
+            "features": [
+                "Practical workshop materials provided",
+                "Industry recognized certificate",
+                "Self-employment guidance",
+                "Small business grant eligibility support"
+            ],
+            "tags": ["batik", "handloom", "traditional", "training", "vocational"],
+            "target_segments": ["mid_career_family", "established_professional", "senior", "parent"],
+            "in_stock": True,
+            "delivery_options": ["delivery", "pickup"],
+            "rating": 4.6,
+            "reviews_count": 203,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_ol_tuition",
+            "name": "National School Curriculum O/L Prep Course",
+            "category": "education",
+            "subcategory": "tuition",
+            "price": 18000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Comprehensive O/L tuition for all subjects by experienced teachers. Weekend and weekday batches available.",
+            "features": [
+                "All 9 subjects covered",
+                "Experienced teachers",
+                "Small batch size (20 students)",
+                "Weekend and evening classes",
+                "Regular assessments",
+                "Free study materials",
+                "3-month package"
+            ],
+            "tags": ["ol", "tuition", "education", "children", "exam_preparation"],
+            "target_segments": ["parent", "secondary_school_parent", "mid_career_family"],
+            "in_stock": True,
+            "delivery_options": ["classroom", "online"],
+            "rating": 4.8,
+            "reviews_count": 312,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_slas_01",
+            "name": "Sri Lanka Administrative Service (SLAS) Training",
+            "category": "education",
+            "subcategory": "professional_exams",
+            "price": 35000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Targeted preparation for Sri Lanka Administrative Service (SLAS) open competitive examination.",
+            "features": [
+                "Comprehensive syllabus coverage",
+                "Past paper discussions",
+                "IQ and General Knowledge focus",
+                "Weekend classes for working professionals",
+                "Mock interviews"
+            ],
+            "tags": ["slas", "government_exam", "career", "professional"],
+            "target_segments": ["government_employee", "young_adult", "graduate"],
+            "in_stock": True,
+            "delivery_options": ["classroom", "online"],
+            "rating": 4.9,
+            "reviews_count": 120,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_part_time_job_01",
+            "name": "Government Digitalization Support - Data Entry",
+            "category": "jobs",
+            "subcategory": "part_time",
+            "price": 0,
+            "currency": "LKR",
+            "images": [],
+            "description": "Flexible part-time opportunity for data entry operators. Work from home options available.",
+            "features": [
+                "Flexible hours",
+                "Weekly payout",
+                "Training provided",
+                "No prior experience required"
+            ],
+            "tags": ["job", "part_time", "data_entry", "work_from_home"],
+            "target_segments": ["student", "young_adult", "parent"],
+            "in_stock": True,
+            "delivery_options": ["online"],
+            "rating": 4.2,
+            "reviews_count": 45,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_kids_coding",
+            "name": "Young Tech Innovators Coding Academy",
+            "category": "education",
+            "subcategory": "children",
+            "price": 12000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Fun and interactive coding classes for children. Learn Scratch, Python, and Web Basics.",
+            "features": [
+                "Game-based learning",
+                "Weekend batches",
+                "Certificate of completion",
+                "Project showcase"
+            ],
+            "tags": ["coding", "kids", "education", "stem"],
+            "target_segments": ["parent", "secondary_school_parent"],
+            "in_stock": True,
+            "delivery_options": ["classroom", "online"],
+            "rating": 4.8,
+            "reviews_count": 78,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_prof_dev_01",
+            "name": "Executive Leadership & Governance Program",
+            "category": "education",
+            "subcategory": "professional_development",
+            "price": 15000,
+            "currency": "LKR",
+            "images": [],
+            "description": "2-day intensive workshop on leadership and management skills for mid-career professionals.",
+            "features": [
+                "Industry expert trainers",
+                "Networking opportunities",
+                "Certificate",
+                "Lunch and refreshments included"
+            ],
+            "tags": ["leadership", "management", "professional", "workshop"],
+            "target_segments": ["mid_career_family", "professional", "manager"],
+            "in_stock": True,
+            "delivery_options": ["classroom"],
+            "rating": 4.6,
+            "reviews_count": 52,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_solar_panel",
+            "name": "National Green Energy - Home Solar Kit (3kW) Deposit",
+            "category": "professional_services",
+            "subcategory": "home_appliances",
+            "price": 95000,
+            "original_price": 110000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Initial advance deposit for complete 3kW solar power system. Balance through government interest-free loan.",
+            "features": [
+                "10 Monocrystalline Panels",
+                "3kW Hybrid Inverter",
+                "10-year warranty",
+                "Free basic installation"
+            ],
+            "tags": ["solar", "energy", "home", "electronics"],
+            "target_segments": ["homeowner", "mid_career_family", "senior"],
+            "in_stock": True,
+            "delivery_options": ["delivery"],
+            "rating": 4.7,
+            "reviews_count": 89,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_tax_consultation",
+            "name": "Official Tax Filing & Advisory Service",
+            "category": "professional_services",
+            "subcategory": "finance",
+            "price": 5000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Professional assistance with annual tax filing for individuals and SMEs.",
+            "features": [
+                "1-hour consultation",
+                "TIN registration support",
+                "Document verification",
+                "Filing submission"
+            ],
+            "tags": ["tax", "finance", "business", "consultation"],
+            "target_segments": ["business_owner", "professional", "freelancer"],
+            "in_stock": True,
+            "delivery_options": ["online", "consultation"],
+            "rating": 4.9,
+            "reviews_count": 210,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_organic_fert",
+            "name": "Subsidized Organic Fertilizer (50kg Bag)",
+            "category": "agriculture",
+            "subcategory": "supplies",
+            "price": 1500,
+            "original_price": 2500,
+            "currency": "LKR",
+            "images": [],
+            "description": "High-quality, eco-friendly organic fertilizer. Subsidized rate for registered farmers.",
+            "features": [
+                "100% Organic",
+                "Government Certified",
+                "Rich in nutrients",
+                "Suitable for all crops"
+            ],
+            "tags": ["agriculture", "farming", "organic", "fertilizer"],
+            "target_segments": ["farmer", "home_gardener", "business_owner"],
+            "in_stock": True,
+            "delivery_options": ["pickup"],
+            "rating": 4.5,
+            "reviews_count": 450,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_driver_training",
+            "name": "Vocational Skill Development - Heavy Vehicle Driving",
+            "category": "training",
+            "subcategory": "skills",
+            "price": 25000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Comprehensive training course for heavy vehicle driving license. Includes theory and practical sessions.",
+            "features": [
+                "RMV Approved Curriculum",
+                "Experienced Instructors",
+                "Practical sessions included",
+                "License application support"
+            ],
+            "tags": ["driving", "training", "license", "career"],
+            "target_segments": ["young_adult", "job_seeker", "career_changer"],
+            "in_stock": True,
+            "delivery_options": ["classroom"],
+            "rating": 4.6,
+            "reviews_count": 112,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_passport_fast",
+            "name": "National e-Passport Fast-Track Delivery",
+            "category": "visa_services",
+            "subcategory": "passport_services",
+            "price": 15000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Fast-track processing and secure courier delivery of your new biometric e-Passport.",
+            "features": [
+                "3-day rapid turnaround",
+                "Secure home delivery",
+                "Real-time SMS updates",
+                "Biometric coordination support"
+            ],
+            "tags": ["passport", "fast_track", "visa", "immigration"],
+            "target_segments": ["young_adult", "early_career", "overseas_interested"],
+            "in_stock": True,
+            "delivery_options": ["delivery"],
+            "rating": 4.8,
+            "reviews_count": 94,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_nic_express",
+            "name": "Smart National Identity Card (NIC) Express Issuance",
+            "category": "visa_services",
+            "subcategory": "identity_services",
+            "price": 5000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Express registration and biometric processing for the smart National Identity Card.",
+            "features": [
+                "Same-day biometric appointment",
+                "High-priority queue assignment",
+                "Direct-to-home mail delivery"
+            ],
+            "tags": ["nic", "identity", "express", "government"],
+            "target_segments": ["young_adult", "all_citizens"],
+            "in_stock": True,
+            "delivery_options": ["delivery", "pickup"],
+            "rating": 4.7,
+            "reviews_count": 142,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_business_setup",
+            "name": "Business Registration Portal Setup Service",
+            "category": "professional_services",
+            "subcategory": "business_support",
+            "price": 25000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Complete digital registration for local companies with IRD, EPF, and ETF registration support.",
+            "features": [
+                "1-day fast processing",
+                "Official e-ROC registration integration",
+                "Corporate bank account setup guidance"
+            ],
+            "tags": ["business", "registration", "company", "startup"],
+            "target_segments": ["entrepreneur", "business_owner", "sme"],
+            "in_stock": True,
+            "delivery_options": ["online"],
+            "rating": 4.9,
+            "reviews_count": 68,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_land_registry",
+            "name": "Land Registry Document Digitization & Verification",
+            "category": "professional_services",
+            "subcategory": "land_services",
+            "price": 8000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Official digital scanning, verification, and certification of your property registry deeds.",
+            "features": [
+                "Certified digital copy issuance",
+                "Blockchain-backed tamper-proof verification",
+                "Multi-agency accessibility"
+            ],
+            "tags": ["land", "deeds", "digitization", "verification"],
+            "target_segments": ["homeowner", "senior", "mid_career_family"],
+            "in_stock": True,
+            "delivery_options": ["online", "consultation"],
+            "rating": 4.6,
+            "reviews_count": 57,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_career_guidance",
+            "name": "National Career Guidance & Skills Assessment",
+            "category": "training",
+            "subcategory": "skills_assessment",
+            "price": 3000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Certified skills assessment and career guidance counseling with senior public sector advisors.",
+            "features": [
+                "1-on-1 expert counseling session",
+                "Personalized career development roadmap",
+                "Official certification report"
+            ],
+            "tags": ["career", "counseling", "skills", "assessment"],
+            "target_segments": ["young_adult", "job_seeker", "graduate"],
+            "in_stock": True,
+            "delivery_options": ["online", "classroom"],
+            "rating": 4.8,
+            "reviews_count": 218,
+            "created": datetime.now(timezone.utc)
+        },
+        {
+            "id": "prod_soil_testing",
+            "name": "Organic Agricultural Advisory & Soil Testing",
+            "category": "agriculture",
+            "subcategory": "soil_testing",
+            "price": 4000,
+            "currency": "LKR",
+            "images": [],
+            "description": "Government lab testing of farm soil and expert recommendations for organic cultivation.",
+            "features": [
+                "Detailed chemical composition report",
+                "Organic fertilizer application guide",
+                "Expert agricultural farm visit option"
+            ],
+            "tags": ["soil", "agriculture", "farming", "organic"],
+            "target_segments": ["farmer", "home_gardener"],
+            "in_stock": True,
+            "delivery_options": ["pickup", "consultation"],
+            "rating": 4.7,
+            "reviews_count": 83,
+            "created": datetime.now(timezone.utc)
+        }
+    ]
+    try:
+        products_col.insert_many(products, ordered=False)
+        print(f"✓ Seeded {len(products)} products")
+    except errors.BulkWriteError as bwe:
+        print("Note: some products may already exist. BulkWriteError:", bwe.details)
+    except Exception as e:
+        print(f"Failed to seed products: {e}", file=sys.stderr)
+
+def seed_sample_users():
+    print("\n[7/7] Seeding sample users...")
+    sample_users = []
+
+    # Government employees without degrees
+    for i in range(15):
+        age = random.randint(35, 45)
+        children_count = random.randint(1, 3)
+        children_ages = [random.randint(5, 20) for _ in range(children_count)]
+
+        user = {
+            "sample_data": True,
+            "profile": {
+                "basic": {
+                    "name": f"Government Employee {i+1}",
+                    "age": age,
+                    "location": random.choice(["Colombo", "Kandy", "Gampaha", "Galle"]),
+                    "phone": f"071{random.randint(1000000, 9999999)}"
+                }
+            },
+            "extended_profile": {
+                "family": {
+                    "age": age,
+                    "marital_status": "married",
+                    "children": [f"Child {j+1}" for j in range(children_count)],
+                    "children_ages": children_ages,
+                    "children_education": [random.choice(["primary", "secondary", "ol", "tuition"]) for _ in range(children_count)],
+                    "dependents": children_count
+                },
+                "education": {
+                    "highest_qualification": random.choice(["ol", "al", "diploma"]),
+                    "institution": "Local School/College",
+                    "year_graduated": 2000 + random.randint(0, 10)
+                },
+                "career": {
+                    "current_job": f"Government {random.choice(['Clerk', 'Officer', 'Administrator'])}",
+                    "years_experience": age - 22,
+                    "skills": ["administration", "management"],
+                    "career_goals": ["degree_completion", "promotion"]
+                },
+                "interests": {
+                    "learning_interests": ["degree_programs", "professional_courses"],
+                    "service_preferences": ["education", "career_development"]
+                },
+                "consent": {
+                    "marketing_emails": True,
+                    "personalized_ads": True,
+                    "data_analytics": True
+                }
+            },
+            "created": datetime.now(timezone.utc) - timedelta(days=random.randint(1, 365)),
+            "last_active": datetime.now(timezone.utc) - timedelta(hours=random.randint(1, 72))
+        }
+        sample_users.append(user)
+
+    # Young professionals
+    for i in range(15):
+        age = random.randint(25, 35)
+        user = {
+            "sample_data": True,
+            "profile": {
+                "basic": {
+                    "name": f"Young Professional {i+1}",
+                    "age": age,
+                    "location": random.choice(["Colombo", "Kandy", "Negombo"]),
+                    "phone": f"077{random.randint(1000000, 9999999)}"
+                }
+            },
+            "extended_profile": {
+                "family": {
+                    "age": age,
+                    "marital_status": random.choice(["single", "married"])
+                },
+                "education": {
+                    "highest_qualification": random.choice(["degree", "diploma", "al"]),
+                    "year_graduated": 2015 + random.randint(0, 8)
+                },
+                "career": {
+                    "current_job": f"{random.choice(['IT', 'Marketing', 'Finance'])} Executive",
+                    "career_goals": ["overseas_opportunities", "skill_development"]
+                },
+                "interests": {
+                    "learning_interests": ["ielts", "overseas_jobs", "certifications"]
+                },
+                "consent": {
+                    "marketing_emails": True,
+                    "personalized_ads": True
+                }
+            },
+            "created": datetime.now(timezone.utc) - timedelta(days=random.randint(1, 365))
+        }
+        sample_users.append(user)
+
+    # Parents with school children
+    for i in range(20):
+        age = random.randint(40, 55)
+        children_count = random.randint(1, 3)
+        children_ages = [random.randint(5, 18) for _ in range(children_count)]
+
+        user = {
+            "sample_data": True,
+            "profile": {
+                "basic": {
+                    "name": f"Parent {i+1}",
+                    "age": age,
+                    "location": random.choice(["Colombo", "Kandy", "Kurunegala"]),
+                    "phone": f"075{random.randint(1000000, 9999999)}"
+                }
+            },
+            "extended_profile": {
+                "family": {
+                    "age": age,
+                    "marital_status": "married",
+                    "children": [f"Child {j+1}" for j in range(children_count)],
+                    "children_ages": children_ages,
+                    "children_education": [random.choice(["primary", "secondary", "ol_prep", "al_prep"]) for _ in range(children_count)]
+                },
+                "education": {
+                    "highest_qualification": random.choice(["al", "degree", "diploma"])
+                },
+                "career": {
+                    "current_job": random.choice(["Business Owner", "Teacher", "Professional"]),
+                    "career_goals": ["children_education", "financial_security"]
+                },
+                "interests": {
+                    "learning_interests": ["children_education", "exam_preparation"],
+                    "service_preferences": ["education_services", "family_products"]
+                },
+                "consent": {
+                    "marketing_emails": True,
+                    "personalized_ads": True
+                }
+            },
+            "created": datetime.now(timezone.utc) - timedelta(days=random.randint(1, 365))
+        }
+        sample_users.append(user)
+
+    try:
+        users_col.insert_many(sample_users, ordered=False)
+        print(f"✓ Seeded {len(sample_users)} sample users")
+    except errors.BulkWriteError as bwe:
+        print("Note: some sample users may already exist. BulkWriteError:", bwe.details)
+    except Exception as e:
+        print(f"Failed to seed sample users: {e}", file=sys.stderr)
+
+def ensure_admin():
+    if admins_col.count_documents({}) == 0:
+        pwd = os.getenv("ADMIN_PWD", "admin123")
+        hashed = bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt())
+        try:
+            admins_col.insert_one({
+                "username": "admin",
+                "email": os.getenv("ADMIN_EMAIL", "admin@example.com"),
+                "password": hashed,
+                "created": datetime.now(timezone.utc)
+            })
+            print("\n✓ Admin user created (username: admin)")
+        except errors.DuplicateKeyError:
+            print("Admin user already exists (duplicate key).")
+        except Exception as e:
+            print(f"Failed to create admin user: {e}", file=sys.stderr)
+    else:
+        print("Admin user(s) already present, skipping admin creation.")
+
+def print_summary():
+    print("\n" + "=" * 60)
+    print("DATABASE SEEDING COMPLETED SUCCESSFULLY!")
+    print("=" * 60)
+    print(f"\nServices: {services_col.count_documents({})}")
+    print(f"Categories: {categories_col.count_documents({})}")
+    print(f"Officers: {officers_col.count_documents({})}")
+    print(f"Ads: {ads_col.count_documents({})}")
+    print(f"Products: {products_col.count_documents({})}")
+    print(f"Sample Users: {users_col.count_documents({'sample_data': True})}")
+    print(f"Admins: {admins_col.count_documents({})}")
+    print("\nNext steps:")
+    print("1. Run the app: python app.py")
+    print("2. Login to admin panel: http://localhost:5000/admin")
+    print("3. Build AI index: flask build-index (Required for AI search)")
+    print("\nNote: This script only removes sample users (sample_data=True). It clears services/products/ads to ensure consistent seed state.")
+
+def main():
+    print("=" * 60)
+    print("CITIZEN PORTAL - DATABASE SEEDING")
+    print("=" * 60)
+
+    create_indexes()
+    clear_collections()
+    seed_categories()
+    seed_services()
+    # seed_officers()
+    seed_ads()
+    seed_products()
+    # seed_sample_users()
+    ensure_admin()
+    print_summary()
 
 if __name__ == "__main__":
-    seed_database()
+    main()

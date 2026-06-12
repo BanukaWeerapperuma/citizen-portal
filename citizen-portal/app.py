@@ -1,772 +1,1450 @@
-import os
-import json
-import numpy as np
-import bcrypt
-from flask import Flask, request, jsonify, render_template, send_file, session
-import csv
-import io
-from flask_cors import CORS
-from pymongo import MongoClient, ReturnDocument
-from bson import ObjectId
-import google.generativeai as genai
-from functools import wraps
+
+# Load env variables
 from dotenv import load_dotenv
-from datetime import datetime
+import os
+import pathlib
+
+# Check root then backend folder for .env
+if os.path.exists(".env"):
+    load_dotenv()
+elif os.path.exists("backend/.env"):
+    load_dotenv("backend/.env")
+import json
 import logging
+import secrets
+import hashlib
+from datetime import datetime, timedelta, timezone
+import re
+from functools import wraps
+import pathlib
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-# 1. Initialize Flask & App Configurations
-load_dotenv()
+from flask import Flask, jsonify, render_template, request, session, redirect, send_from_directory
+from flask_cors import CORS
+from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
+import bcrypt
+import numpy as np
+from bson import ObjectId
+import certifi
 
-# Read from environment variables with default fallbacks
-mongo_uri = os.getenv('MONGO_URI', 'mongodb://localhost:27017/')
-flask_secret = os.getenv('FLASK_SECRET', 'dev-secret')
-
-# Configure logging
-logging.basicConfig(
-    filename='app.log',
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s %(name)s %(threadName)s : %(message)s'
-)
-
-app = Flask(__name__)
-app.secret_key = flask_secret
-CORS(app)
-
-# Safe FAISS Import Fallback
 try:
-    import faiss
-    FAISS_AVAILABLE = True
+    import google.generativeai as genai
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if GOOGLE_API_KEY:
+        genai.configure(api_key=GOOGLE_API_KEY)
+    AI_AVAILABLE = True if GOOGLE_API_KEY else False
 except ImportError:
-    FAISS_AVAILABLE = False
-    faiss = None
+    AI_AVAILABLE = False
 
-# FAISS Configuration Paths
-FAISS_INDEX_PATH = "./data/faiss.index"
-FAISS_META_PATH = "./data/faiss_meta.json"
+# FAISS and SentenceTransformers removed for Vercel size limits
+FAISS_AVAILABLE = False
 
-# Lazy-initialization function for sentence-transformer model
-_embed_model = None
+# ---------------- Flask App ----------------
+app = Flask(__name__, static_folder="static", template_folder="templates")
+app.secret_key = os.getenv("FLASK_SECRET", "dev-secret")
+app.config['MAX_CONTENT_LENGTH'] = int(os.getenv("MAX_CONTENT_LENGTH", 16777216))
+app.config['SESSION_COOKIE_SECURE'] = os.getenv("SESSION_COOKIE_SECURE", "False") == "True"
+app.config['SESSION_COOKIE_HTTPONLY'] = os.getenv("SESSION_COOKIE_HTTPONLY", "True") == "True"
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
-def get_embed_model():
-    global _embed_model
-    if _embed_model is None:
-        model_name = os.getenv('EMBED_MODEL', 'sentence-transformers/all-MiniLM-L6-v2')
-        from sentence_transformers import SentenceTransformer
-        _embed_model = SentenceTransformer(model_name)
-    return _embed_model
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-@app.route('/api/ping')
-def ping():
-    return jsonify({"status": "alive", "time": datetime.now().isoformat()})
+# ---------------- Logging ----------------
+try:
+    os.makedirs("logs", exist_ok=True)
+    log_file = os.getenv("LOG_FILE", "./logs/app.log")
+    handlers = [logging.FileHandler(log_file), logging.StreamHandler()]
+except Exception:
+    handlers = [logging.StreamHandler()]
 
-# 2. Connect to MongoDB (citizen_portal database)
-client = MongoClient(mongo_uri)
-db = client['citizen_portal']
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")),
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=handlers
+)
+logger = logging.getLogger(__name__)
+
+# ---------------- MongoDB ----------------
+MONGO_URI = os.getenv("MONGO_URI")
+DB_NAME = os.getenv("DB_NAME", "citizen_portal")
+
+if not MONGO_URI:
+    logger.warning("MONGO_URI not found. Application will use MockMongoClient.")
+
+class MockCursor:
+    def __init__(self, data):
+        self.data = data
+    def __iter__(self): return iter(self.data)
+    def limit(self, *args, **kwargs): return MockCursor(self.data[:args[0]])
+    def sort(self, *args, **kwargs): return self
+
+class MockCollection:
+    def __init__(self, name):
+        self.name = name
+        self.docs = []
+    
+    def find(self, query=None, *args, **kwargs):
+        if not query: return MockCursor(self.docs)
+        res = []
+        for d in self.docs:
+            match = True
+            for k, v in query.items():
+                if isinstance(v, dict): continue
+                if str(d.get(k)) != str(v): match = False
+            if match: res.append(d)
+        return MockCursor(res)
+        
+    def find_one(self, query=None, *args, **kwargs):
+        if not query: return self.docs[0] if self.docs else None
+        for d in self.docs:
+            match = True
+            for k, v in query.items():
+                if isinstance(v, dict): continue
+                if str(d.get(k)) != str(v): match = False
+            if match: return d
+        return None
+        
+    def insert_one(self, doc, *args, **kwargs):
+        from bson import ObjectId
+        if '_id' not in doc:
+            doc['_id'] = ObjectId()
+        self.docs.append(doc)
+        class Result: 
+            def __init__(self, id): self.inserted_id = id
+        return Result(doc['_id'])
+        
+    def update_one(self, query, update, *args, **kwargs):
+        doc = self.find_one(query)
+        if doc and '$set' in update:
+            for k, v in update['$set'].items():
+                keys = k.split('.')
+                curr = doc
+                for key in keys[:-1]:
+                    if key not in curr: curr[key] = {}
+                    curr = curr[key]
+                curr[keys[-1]] = v
+                
+    def update_many(self, query, update, *args, **kwargs):
+        docs = list(self.find(query))
+        for doc in docs:
+            if '$set' in update:
+                for k, v in update['$set'].items():
+                    doc[k] = v
+        
+    def delete_one(self, query, *args, **kwargs):
+        doc = self.find_one(query)
+        if doc:
+            self.docs.remove(doc)
+            class Result: deleted_count = 1
+            return Result()
+        class Result: deleted_count = 0
+        return Result()
+        
+    def count_documents(self, query=None, *args, **kwargs):
+        return len(list(self.find(query)))
+        
+    def distinct(self, key, *args, **kwargs):
+        return list(set(d.get(key) for d in self.docs if key in d and d.get(key) is not None))
+
+class MockDB:
+    def __init__(self):
+        self.collections = {}
+    def __getitem__(self, name):
+        if name not in self.collections:
+            self.collections[name] = MockCollection(name)
+        return self.collections[name]
+
+class MockMongoClient:
+    def __init__(self, *args, **kwargs):
+        self.admin = self
+        self.db = MockDB()
+    def command(self, *args, **kwargs): pass
+    def __getitem__(self, name): return self.db
+
+try:
+    if MONGO_URI:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
+        client.admin.command('ping')
+        logger.info("MongoDB client created")
+    else:
+        logger.warning("No MONGO_URI provided, skipping real connection.")
+        client = MockMongoClient()
+except Exception as e:
+    logger.warning(f"MongoDB connection failed: {e}. Falling back to in-memory MockMongoClient.")
+    client = MockMongoClient()
+
+db = client[DB_NAME]
 
 # Collections
-services_col = db['services']
-admins_col = db['admins']
-engagement_col = db['engagements']  # mapped to db['engagements'] for metrics logging
-categories_col = db['categories']
-officers_col = db['officers']
-ads_col = db['ads']
-users_col = db['users']
+admins_col = db["admins"]
+categories_col = db["categories"]
+products_col = db["products"]
+orders_col = db["orders"]
+users_col = db["users"]
+eng_col = db["engagements"]
+ads_col = db["ads"]
+payments_col = db["payments"]
+services_col = db["services"]
+citizen_logs_col = db["citizen_access_logs"]  # stores login/logout events
+unanswered_questions_col = db["unanswered_questions"] # stores questions not in DB
 
-def build_vector_index():
-    services = list(services_col.find({}))
-    if not services:
-        return 0, FAISS_AVAILABLE
+# Directories
+os.makedirs("data", exist_ok=True)
+INDEX_PATH = pathlib.Path("data/faiss.index")
+META_PATH = pathlib.Path("data/faiss_meta.json")
 
-    texts = []
-    metadata = []
-
-    for s in services:
-        service_id = s.get('id', '')
-        service_name = s.get('name', {}).get('en', '')
-
-        for sub in s.get('subservices', []):
-            subservice_id = sub.get('id', '')
-            subservice_name = sub.get('name', {}).get('en', '')
-
-            for q_obj in sub.get('questions', []):
-                question_text = q_obj.get('q', {}).get('en', '')
-                answer_text = q_obj.get('answer', {}).get('en', '')
-
-                if not question_text:
-                    continue
-
-                content = f"{service_name} | {subservice_name} | {question_text} | {answer_text}"
-                texts.append(content)
-
-                metadata.append({
-                    "service_id": service_id,
-                    "subservice_id": subservice_id,
-                    "title": question_text,
-                    "downloads": q_obj.get('downloads'),
-                    "location": q_obj.get('location'),
-                    "instructions": q_obj.get('instructions'),
-                    "content": content
-                })
-
-    if not texts:
-        return 0, FAISS_AVAILABLE
-
-    model = get_embed_model()
-    embeddings = model.encode(texts)
-    embeddings = np.array(embeddings).astype('float32')
-
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    normalized_embeddings = np.divide(embeddings, norms, out=np.zeros_like(embeddings), where=norms > 0)
-
-    os.makedirs("./data", exist_ok=True)
-
-    if FAISS_AVAILABLE:
-        dimension = normalized_embeddings.shape[1]
-        index = faiss.IndexFlatIP(dimension)
-        index.add(normalized_embeddings)
-        faiss.write_index(index, FAISS_INDEX_PATH)
-    else:
-        np.save("./data/embeddings.npy", normalized_embeddings)
-
-    with open(FAISS_META_PATH, 'w', encoding='utf-8') as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-    return len(texts), FAISS_AVAILABLE
-
-def search_vectors(query, top_k=5):
-    model = get_embed_model()
-    query_vector = model.encode(query)
-    query_vector = np.array(query_vector).astype('float32')
-
-    norm = np.linalg.norm(query_vector)
-    if norm > 0:
-        query_vector = query_vector / norm
-    else:
-        query_vector = np.zeros_like(query_vector)
-
-    metadata = []
-    if os.path.exists(FAISS_META_PATH):
-        try:
-            with open(FAISS_META_PATH, 'r', encoding='utf-8') as f:
-                metadata = json.load(f)
-        except Exception as e:
-            app.logger.error(f"Error loading faiss metadata: {str(e)}")
-
-    if not metadata:
-        return []
-
-    hits = []
-
-    if FAISS_AVAILABLE and os.path.exists(FAISS_INDEX_PATH):
-        try:
-            index = faiss.read_index(FAISS_INDEX_PATH)
-            D, I = index.search(np.array([query_vector]).astype('float32'), top_k)
-            for idx, score in zip(I[0], D[0]):
-                if idx != -1 and idx < len(metadata):
-                    hits.append({
-                        "metadata": metadata[idx],
-                        "score": float(score)
-                    })
-            return hits
-        except Exception as e:
-            app.logger.error(f"FAISS search failed, falling back to NumPy: {str(e)}")
-
-    embeddings_npy_path = "./data/embeddings.npy"
-    if os.path.exists(embeddings_npy_path):
-        try:
-            embeddings = np.load(embeddings_npy_path)
-            scores = embeddings @ query_vector
-            indices = np.argsort(scores)[::-1][:top_k]
-            for idx in indices:
-                if idx < len(metadata):
-                    hits.append({
-                        "metadata": metadata[idx],
-                        "score": float(scores[idx])
-                    })
-        except Exception as e:
-            app.logger.error(f"NumPy vector search failed: {str(e)}")
-
-    return hits
-
-# 3. Security: admin_required decorator
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
-        admin_pwd = "admin123"
-        if not auth_header or auth_header != f"Bearer {admin_pwd}":
-            return jsonify({"error": "Unauthorized. Admin access required."}), 401
-        return f(*args, **kwargs)
-    return decorated_function
-
-# 4. Auto-Setup: Create default admin
-def setup_admin():
-    if admins_col.count_documents({}) == 0:
-        admin_user = "admin"
-        admin_pwd = os.getenv('ADMIN_PWD', 'admin123')
-        hashed = bcrypt.hashpw(admin_pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        admins_col.update_one(
-            {"username": admin_user},
-            {"$set": {"password": hashed, "role": "superadmin"}},
-            upsert=True
+def get_embeddings(texts):
+    """Get embeddings using Google Gemini API"""
+    if not AI_AVAILABLE:
+        return None
+    try:
+        # Using the lightweight embedding model
+        result = genai.embed_content(
+            model="models/embedding-001",
+            content=texts,
+            task_type="retrieval_document"
         )
-        print(f"Admin user '{admin_user}' verified/created with hashed password.")
+        return np.array(result['embedding'], dtype='float32')
+    except Exception as e:
+        logger.error(f"Gemini Embedding error: {e}")
+        return None
 
-# Run setup
-setup_admin()
+def cosine_sim(a, b):
+    """Simple cosine similarity using numpy"""
+    # a: (1, dim), b: (N, dim)
+    norm_a = np.linalg.norm(a, axis=1, keepdims=True)
+    norm_b = np.linalg.norm(b, axis=1, keepdims=True)
+    return np.dot(a, b.T) / (norm_a * norm_b.T)
 
-# 5. Frontend Routes
-@app.route('/')
-def index():
-    return render_template('index.html')
+# ---------------- Email Utility ----------------
+def _send_email_base(to_email, subject, body):
+    """Base helper to send email using configured SMTP settings"""
+    smtp_server = os.getenv("MAIL_SERVER", "smtp.gmail.com")
+    smtp_port = int(os.getenv("MAIL_PORT", 587))
+    smtp_user = os.getenv("MAIL_USERNAME")
+    smtp_pwd = os.getenv("MAIL_PASSWORD")
+    
+    if not smtp_user or not smtp_pwd:
+        logger.warning(f"Email credentials missing. Could not send '{subject}' to {to_email}")
+        return False
 
-@app.route('/admin')
-def admin_page():
-    return render_template('admin.html')
+    msg = MIMEMultipart()
+    msg['From'] = f"Citizen Portal <{smtp_user}>"
+    msg['To'] = to_email
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
 
-# 6. Auth Routes
-@app.route('/api/auth/register', methods=['POST'])
-def register():
-    data = request.json
-    if users_col.find_one({"username": data['username']}):
-        return jsonify({"error": "User already exists"}), 400
-    users_col.insert_one(data)
-    return jsonify({"message": "User created"}), 201
+    try:
+        # Port 465 is typically for SMTP_SSL
+        if smtp_port == 465:
+            server = smtplib.SMTP_SSL(smtp_server, smtp_port, timeout=10)
+        else:
+            server = smtplib.SMTP(smtp_server, smtp_port, timeout=10)
+            server.starttls()
+            
+        server.login(smtp_user, smtp_pwd)
+        server.send_message(msg)
+        server.quit()
+        logger.info(f"Email '{subject}' successfully sent to {to_email}")
+        return True
+    except Exception as e:
+        logger.error(f"SMTP Error sending '{subject}' to {to_email}: {e}")
+        return False
 
-@app.route('/api/auth/login', methods=['POST'])
-def login():
-    data = request.json
-    user = users_col.find_one({"username": data['username'], "password": data['password']})
-    if user:
-        return jsonify({"message": "Login successful", "username": user['username']}), 200
-    return jsonify({"error": "Invalid credentials"}), 401
+def send_verification_email(to_email, token):
+    """Sends a welcome/verification email to the user"""
+    base_url = request.url_root.rstrip('/')
+    verify_link = f"{base_url}/api/citizen/verify/{token}"
+    subject = "Welcome to Citizen Portal - Verify Your Account"
+    body = f"Hello,\n\nWelcome to the Sri Lankan Citizen Portal. Please verify your email at:\n{verify_link}\n\nThank you!"
+    return _send_email_base(to_email, subject, body)
 
-@app.route('/admin/login', methods=['POST'])
-def admin_login_form():
-    username = request.form.get('username')
-    password = request.form.get('password')
-    if not username or not password:
-        return jsonify({"error": "Username and password are required"}), 400
+def send_reset_password_email(to_email, token):
+    """Sends a password reset email to the user"""
+    base_url = request.url_root.rstrip('/')
+    reset_link = f"{base_url}/citizen/reset-password/{token}"
+    subject = "Reset Your Citizen Portal Password"
+    body = f"Hello,\n\nWe received a request to reset your password. Click the link below to set a new one:\n{reset_link}\n\nThis link expires in 1 hour."
+    return _send_email_base(to_email, subject, body)
 
-    admin = admins_col.find_one({"username": username})
-    if not admin:
-        return jsonify({"error": "Invalid credentials"}), 401
+# ---------------- Decorators ----------------
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not (session.get("admin_logged_in") or session.get("admin")):
+            return jsonify({"error": "Unauthorized"}), 401
+        return fn(*args, **kwargs)
+    return wrapper
 
-    hashed_pwd = admin.get('password', '')
-    if isinstance(hashed_pwd, str) and (hashed_pwd.startswith('$2b$') or hashed_pwd.startswith('$2a$')):
+def handle_errors(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
         try:
-            password_matched = bcrypt.checkpw(password.encode('utf-8'), hashed_pwd.encode('utf-8'))
-        except Exception:
-            password_matched = False
-    else:
-        password_matched = (hashed_pwd == password)
+            return fn(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Error in {fn.__name__}: {e}", exc_info=True)
+            return jsonify({"error": "Internal server error", "message": str(e)}), 500
+    return wrapper
 
-    if password_matched:
-        session["admin_logged_in"] = True
-        session["admin_user"] = username
-        return jsonify({"message": "Login successful"}), 200
-    return jsonify({"error": "Invalid credentials"}), 401
+# ── Citizen token helpers ─────────────────────────────────────────────────────
+def generate_citizen_token(user_id: str) -> str:
+    """Create a simple signed token: sha256(user_id + secret)."""
+    raw = f"{user_id}:{app.secret_key}"
+    return hashlib.sha256(raw.encode()).hexdigest()
 
+def citizen_required(fn):
+    """Decorator: require a valid citizen token in Authorization header."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        token = auth.replace("Bearer ", "").strip()
+        user_id = request.headers.get("X-Citizen-Id", "").strip()
+        if not token or not user_id:
+            return jsonify({"error": "Authentication required"}), 401
+            
+        expected = generate_citizen_token(user_id)
+        # Check backward compatibility with older date-based tokens (up to 120 days old)
+        valid_tokens = [expected]
+        for i in range(120):
+            valid_tokens.append(hashlib.sha256(f"{user_id}:{app.secret_key}:{(datetime.now(timezone.utc) - timedelta(days=i)).date()}".encode()).hexdigest())
+        
+        if token not in valid_tokens:
+            logger.error(f"401 Token mismatch - UserID: {user_id}, Token: {token}")
+            return jsonify({"error": "Invalid or expired token"}), 401
+        request.citizen_id = user_id
+        return fn(*args, **kwargs)
+    return wrapper
 
-@app.route('/api/admin/login', methods=['POST'])
+# ---------------- Routes ----------------
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "online",
+        "mongodb": "mock" if isinstance(client, MockMongoClient) else "connected",
+        "ai": AI_AVAILABLE
+    })
+
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+@app.route("/citizen/login")
+def citizen_login_page():
+    return render_template("citizen_login.html")
+
+@app.route("/citizen/register")
+def citizen_register_page():
+    return render_template("citizen_register.html")
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(os.path.join(app.root_path, 'static'),
+                               'favicon.ico', mimetype='image/vnd.microsoft.icon')
+
+@app.route("/store")
+def store():
+    return render_template("store.html")
+
+# ---------------- Admin ----------------
+@app.route("/admin")
+def admin_dashboard():
+    if not (session.get("admin_logged_in") or session.get("admin")):
+        return redirect("/admin/login")
+    return render_template("admin.html")
+
+@app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
-    data = request.json or {}
-    username = data.get('username')
-    password = data.get('password')
-    if not username or not password:
-        return jsonify({"error": "Username and password are required"}), 400
-
+    if session.get("admin_logged_in"):
+        return redirect("/admin")
+    if request.method == "GET":
+        return render_template("login.html")
+    data = request.form or request.get_json() or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
     admin = admins_col.find_one({"username": username})
-    if not admin:
-        return jsonify({"error": "Invalid credentials"}), 401
+    if admin:
+        stored = admin.get("password")
+        if isinstance(stored, str):
+            ok = stored == password
+        else:
+            try:
+                ok = bcrypt.checkpw(password.encode("utf-8"), stored)
+            except TypeError:
+                ok = False
+        if ok:
+            session.permanent = True
+            session["admin_logged_in"] = True
+            session["admin_user"] = username
+            session["admin"] = True
+            return redirect("/admin")
 
-    hashed_pwd = admin.get('password', '')
-    if isinstance(hashed_pwd, str) and (hashed_pwd.startswith('$2b$') or hashed_pwd.startswith('$2a$')):
-        try:
-            password_matched = bcrypt.checkpw(password.encode('utf-8'), hashed_pwd.encode('utf-8'))
-        except Exception:
-            password_matched = False
-    else:
-        password_matched = (hashed_pwd == password)
-
-    if password_matched:
-        session["admin_logged_in"] = True
-        session["admin_user"] = username
-        return jsonify({"message": "Login successful", "token": password}), 200
+    if request.method == "POST" and request.form:
+        return render_template("login.html", error="Invalid username or password")
     return jsonify({"error": "Invalid credentials"}), 401
 
-
-@app.route('/api/admin/logout', methods=['POST'])
+@app.route("/api/admin/logout", methods=["POST"])
 @admin_required
 def admin_logout():
     session.clear()
-    return jsonify({"message": "Logged out successfully"}), 200
+    return jsonify({"status": "logged out"})
 
-@app.route('/api/profile/step', methods=['POST'])
-def profile_step():
+# ---------------- Citizen Auth ----------------
+@app.route("/api/citizen/register", methods=["POST"])
+@handle_errors
+def citizen_register():
     data = request.json or {}
-    profile_id = data.get('profile_id')
-    email = data.get('email')
-    step = data.get('step', 'unknown')
-    step_data = data.get('data', {})
+    name = data.get("name", "").strip()
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+    phone = data.get("phone", "").strip()
+    age = data.get("age", "")
+    interests = data.get("interests", "").strip()
+    job = data.get("job", "").strip()
+    education = data.get("education", "").strip()
+    user_type = data.get("user_type", "").strip()
 
-    try:
-        if profile_id:
-            users_col.update_one(
-                {"_id": ObjectId(profile_id)},
-                {"$set": {f"profile.{step}": step_data}},
-                upsert=True
-            )
-            ret_id = str(profile_id)
-        elif email:
-            user = users_col.find_one_and_update(
-                {"email": email},
-                {"$set": {f"profile.{step}": step_data}, "$setOnInsert": {"email": email}},
-                upsert=True,
-                return_document=ReturnDocument.AFTER
-            )
-            ret_id = str(user["_id"])
-        else:
-            res = users_col.insert_one({
-                "created_at": datetime.utcnow(),
-                "profile": {
-                    step: step_data
-                }
-            })
-            ret_id = str(res.inserted_id)
+    if not name or not email or not password:
+        return jsonify({"error": "Name, email and password are required."}), 400
+    if len(password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters."}), 400
+    # Valid Gmail check (optional but requested)
+    if not email.endswith("@gmail.com"):
+        return jsonify({"error": "Please use a valid @gmail.com address for registration."}), 400
 
-        return jsonify({"profile_id": ret_id, "status": "updated"}), 200
-    except Exception as e:
-        app.logger.error(f"Error in profile_step: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    if users_col.find_one({"email": email, "sample_data": {"$ne": True}}):
+        return jsonify({"error": "An account with this email already exists."}), 409
+    
+    verification_token = secrets.token_urlsafe(32)
+    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+    
+    res = users_col.insert_one({
+        "email": email,
+        "password": hashed,
+        "profile": {"basic": {"name": name, "age": age, "phone": phone}},
+        "extended_profile": {"interests": interests, "employment": {"job": job, "education": education}, "user_type": user_type},
+        "created": datetime.now(timezone.utc),
+        "sample_data": False,
+        "role": "citizen",
+        "active": True,
+        "is_verified": True,
+        "verification_token": verification_token
+    })
 
-# 7. Admin API Routes
-@app.route('/api/admin/dashboard-stats', methods=['GET'])
-@admin_required
-def dashboard_stats():
-    total = engagement_col.count_documents({})
-    pipeline = [{"$group": {"_id": "$interest", "count": {"$sum": 1}}}]
-    categories = list(engagement_col.aggregate(pipeline))
-    recent = list(engagement_col.find().sort("timestamp", -1).limit(10))
-    for r in recent: r['_id'] = str(r['_id'])
-    return jsonify({"total_engagements": total, "categories": categories, "recent_activity": recent})
+    # Send verification email
+    email_sent = send_verification_email(email, verification_token)
 
-@app.route('/api/admin/export', methods=['GET'])
-@admin_required
-def export_csv():
-    engagements = list(engagement_col.find({}, {"_id": 0}))
-    return jsonify(engagements)
+    citizen_logs_col.insert_one({
+        "user_id": str(res.inserted_id),
+        "email": email,
+        "name": name,
+        "event": "register",
+        "ip": request.remote_addr,
+        "timestamp": datetime.now(timezone.utc)
+    })
+    
+    logger.info(f"New citizen registered: {email}")
+    msg = "Account created successfully! You can now log in."
+    return jsonify({"status": "ok", "message": msg}), 201
 
-@app.route('/api/admin/build_index', methods=['POST'])
-@admin_required
-def admin_build_index():
-    try:
-        count, faiss_used = build_vector_index()
-        return jsonify({
-            "message": "Index built successfully",
-            "records_processed": count,
-            "faiss_used": faiss_used
-        }), 200
-    except Exception as e:
-        app.logger.error(f"Error in admin_build_index: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+@app.route("/api/citizen/verify/<token>", methods=["GET"])
+@handle_errors
+def citizen_verify(token):
+    user = users_col.find_one({"verification_token": token})
+    if not user:
+        return render_template("verify_result.html", success=False, message="Invalid or expired verification token.")
+    
+    users_col.update_one({"_id": user["_id"]}, {"$set": {"is_verified": True, "verification_token": None}})
+    logger.info(f"User verified: {user['email']}")
+    return render_template("verify_result.html", success=True, message="Email verified successfully! You can now log in.")
 
-
-# --- Services CRUD ---
-@app.route('/api/admin/services', methods=['GET', 'POST'])
-@admin_required
-def admin_services():
-    if request.method == 'GET':
-        services = list(services_col.find({}))
-        for s in services:
-            s['_id'] = str(s['_id'])
-        return jsonify(services), 200
-    elif request.method == 'POST':
-        payload = request.json or {}
-        srv_id = payload.get('id')
-        if not srv_id:
-            return jsonify({"error": "Missing required 'id' field"}), 400
-        services_col.update_one({"id": srv_id}, {"$set": payload}, upsert=True)
-        return jsonify({"status": "upserted"}), 200
-
-@app.route('/api/admin/services/<service_id>', methods=['DELETE'])
-@admin_required
-def admin_delete_service(service_id):
-    services_col.delete_one({"id": service_id})
-    return jsonify({"status": "deleted"}), 200
-
-
-# --- Categories CRUD ---
-@app.route('/api/admin/categories', methods=['GET', 'POST', 'DELETE'])
-@admin_required
-def admin_categories():
-    if request.method == 'GET':
-        categories = list(categories_col.find({}))
-        for c in categories:
-            c['_id'] = str(c['_id'])
-        return jsonify(categories), 200
-    elif request.method == 'POST':
-        payload = request.json or {}
-        cat_id = payload.get('id')
-        if not cat_id:
-            return jsonify({"error": "Missing required 'id' field"}), 400
-        categories_col.update_one({"id": cat_id}, {"$set": payload}, upsert=True)
-        return jsonify({"status": "upserted"}), 200
-    elif request.method == 'DELETE':
-        cat_id = request.args.get('id')
-        if not cat_id:
-            return jsonify({"error": "Missing 'id' query parameter"}), 400
-        categories_col.delete_one({"id": cat_id})
-        return jsonify({"status": "deleted"}), 200
-
-@app.route('/api/admin/categories/<category_id>', methods=['DELETE'])
-@admin_required
-def admin_delete_category_path(category_id):
-    categories_col.delete_one({"id": category_id})
-    return jsonify({"status": "deleted"}), 200
-
-
-# --- Officers CRUD ---
-@app.route('/api/admin/officers', methods=['GET', 'POST', 'DELETE'])
-@admin_required
-def admin_officers():
-    if request.method == 'GET':
-        officers = list(officers_col.find({}))
-        for o in officers:
-            o['_id'] = str(o['_id'])
-        return jsonify(officers), 200
-    elif request.method == 'POST':
-        payload = request.json or {}
-        off_id = payload.get('id')
-        if not off_id:
-            return jsonify({"error": "Missing required 'id' field"}), 400
-        officers_col.update_one({"id": off_id}, {"$set": payload}, upsert=True)
-        return jsonify({"status": "upserted"}), 200
-    elif request.method == 'DELETE':
-        off_id = request.args.get('id')
-        if not off_id:
-            return jsonify({"error": "Missing 'id' query parameter"}), 400
-        officers_col.delete_one({"id": off_id})
-        return jsonify({"status": "deleted"}), 200
-
-@app.route('/api/admin/officers/<officer_id>', methods=['DELETE'])
-@admin_required
-def admin_delete_officer_path(officer_id):
-    officers_col.delete_one({"id": officer_id})
-    return jsonify({"status": "deleted"}), 200
-
-
-# --- Ads CRUD ---
-@app.route('/api/admin/ads', methods=['GET', 'POST', 'DELETE'])
-@admin_required
-def admin_ads():
-    if request.method == 'GET':
-        ads = list(ads_col.find({}))
-        for a in ads:
-            a['_id'] = str(a['_id'])
-        return jsonify(ads), 200
-    elif request.method == 'POST':
-        payload = request.json or {}
-        ad_id = payload.get('id')
-        if not ad_id:
-            return jsonify({"error": "Missing required 'id' field"}), 400
-        ads_col.update_one({"id": ad_id}, {"$set": payload}, upsert=True)
-        return jsonify({"status": "upserted"}), 200
-    elif request.method == 'DELETE':
-        ad_id = request.args.get('id')
-        if not ad_id:
-            return jsonify({"error": "Missing 'id' query parameter"}), 400
-        ads_col.delete_one({"id": ad_id})
-        return jsonify({"status": "deleted"}), 200
-
-@app.route('/api/admin/ads/<ad_id>', methods=['DELETE'])
-@admin_required
-def admin_delete_ad_path(ad_id):
-    ads_col.delete_one({"id": ad_id})
-    return jsonify({"status": "deleted"}), 200
-
-
-@app.route('/api/admin/insights', methods=['GET'])
-@admin_required
-def admin_insights():
-    try:
-        age_groups = {
-            "<18": 0,
-            "18-25": 0,
-            "26-40": 0,
-            "41-60": 0,
-            "60+": 0
+@app.route("/api/citizen/forgot-password", methods=["POST"])
+@handle_errors
+def citizen_forgot_password():
+    data = request.json or {}
+    email = data.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"error": "Email is required."}), 400
+    
+    user = users_col.find_one({"email": email, "sample_data": {"$ne": True}})
+    if not user:
+        # Security best practice: don't reveal if account exists
+        return jsonify({"status": "ok", "message": "If an account exists with this email, a reset link has been sent."})
+    
+    reset_token = secrets.token_urlsafe(32)
+    expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+    
+    users_col.update_one({"_id": user["_id"]}, {
+        "$set": {
+            "reset_token": reset_token,
+            "reset_token_expiry": expiry
         }
-        
-        engagements = list(engagement_col.find({}))
-        
-        jobs_map = {}
-        services_map = {}
-        questions_map = {}
-        desires_map = {}
-        
-        for eng in engagements:
-            raw_age = eng.get('age')
-            if raw_age is not None:
-                try:
-                    age = int(raw_age)
-                    if age < 18:
-                        age_groups["<18"] += 1
-                    elif 18 <= age <= 25:
-                        age_groups["18-25"] += 1
-                    elif 26 <= age <= 40:
-                        age_groups["26-40"] += 1
-                    elif 41 <= age <= 60:
-                        age_groups["41-60"] += 1
-                    else:
-                        age_groups["60+"] += 1
-                except (ValueError, TypeError):
-                    pass
-            
-            job = eng.get('job')
-            if job:
-                jobs_map[job] = jobs_map.get(job, 0) + 1
-                
-            service = eng.get('service')
-            if service:
-                services_map[service] = services_map.get(service, 0) + 1
-                
-            question = eng.get('question_clicked') or eng.get('question')
-            if question:
-                questions_map[question] = questions_map.get(question, 0) + 1
-                
-            desires = eng.get('desires')
-            if isinstance(desires, list):
-                for d in desires:
-                    if d:
-                        desires_map[d] = desires_map.get(d, 0) + 1
-            elif isinstance(desires, str):
-                if desires:
-                    desires_map[desires] = desires_map.get(desires, 0) + 1
+    })
+    
+    send_reset_password_email(email, reset_token)
+    return jsonify({"status": "ok", "message": "If an account exists with this email, a reset link has been sent."})
 
-        pipeline = [
-            {
-                "$match": {
-                    "user_id": {"$exists": True, "$ne": None},
-                    "question_clicked": {"$exists": True, "$ne": None}
-                }
-            },
-            {
-                "$group": {
-                    "_id": {
-                        "user_id": "$user_id",
-                        "question_clicked": "$question_clicked"
-                    },
-                    "count": {"$sum": 1}
-                }
-            },
-            {
-                "$match": {
-                    "count": {"$gte": 2}
-                }
-            },
-            {
-                "$project": {
-                    "user_id": "$_id.user_id",
-                    "question_clicked": "$_id.question_clicked",
-                    "count": 1,
-                    "_id": 0
-                }
-            }
-        ]
-        premium_suggestions = list(engagement_col.aggregate(pipeline))
+@app.route("/citizen/reset-password/<token>", methods=["GET"])
+def citizen_reset_password_page(token):
+    user = users_col.find_one({
+        "reset_token": token,
+        "reset_token_expiry": {"$gt": datetime.now(timezone.utc)}
+    })
+    if not user:
+        return render_template("verify_result.html", success=False, message="Invalid or expired reset token.")
+    return render_template("reset_password.html", token=token)
+
+@app.route("/api/citizen/reset-password", methods=["POST"])
+@handle_errors
+def citizen_reset_password_submit():
+    data = request.json or {}
+    token = data.get("token")
+    new_password = data.get("password")
+    
+    if not token or not new_password:
+        return jsonify({"error": "Token and password are required."}), 400
+    if len(new_password) < 8:
+        return jsonify({"error": "Password must be at least 8 characters."}), 400
         
-        return jsonify({
-            "age_groups": age_groups,
-            "jobs": jobs_map,
-            "services": services_map,
-            "questions": questions_map,
-            "desires": desires_map,
-            "premium_suggestions": premium_suggestions
-        }), 200
-    except Exception as e:
-        app.logger.error(f"Error in admin_insights: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    user = users_col.find_one({
+        "reset_token": token,
+        "reset_token_expiry": {"$gt": datetime.now(timezone.utc)}
+    })
+    if not user:
+        return jsonify({"error": "Invalid or expired reset token."}), 400
+        
+    hashed = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt())
+    users_col.update_one({"_id": user["_id"]}, {
+        "$set": {"password": hashed, "reset_token": None, "reset_token_expiry": None}
+    })
+    
+    logger.info(f"Password reset successful for: {user['email']}")
+    return jsonify({"status": "ok", "message": "Password reset successful. You can now log in."})
 
+@app.route("/api/citizen/login", methods=["POST"])
+@handle_errors
+def citizen_login():
+    data = request.json or {}
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+    if not email or not password:
+        return jsonify({"error": "Email and password are required."}), 400
+    user = users_col.find_one({"email": email, "sample_data": {"$ne": True}})
+    if not user:
+        return jsonify({"error": "No account found with this email."}), 401
 
-@app.route('/api/admin/export_csv', methods=['GET'])
+    stored_pwd = user.get("password")
+    if isinstance(stored_pwd, bytes):
+        ok = bcrypt.checkpw(password.encode("utf-8"), stored_pwd)
+    else:
+        ok = False
+    if not ok:
+        citizen_logs_col.insert_one({
+            "user_id": str(user["_id"]),
+            "email": email,
+            "name": (user.get("profile") or {}).get("basic", {}).get("name", ""),
+            "event": "login_failed",
+            "ip": request.remote_addr,
+            "timestamp": datetime.now(timezone.utc)
+        })
+        return jsonify({"error": "Incorrect password."}), 401
+    user_id = str(user["_id"])
+    token = generate_citizen_token(user_id)
+    name = (user.get("profile") or {}).get("basic", {}).get("name", email)
+    citizen_logs_col.insert_one({
+        "user_id": user_id,
+        "email": email,
+        "name": name,
+        "event": "login",
+        "ip": request.remote_addr,
+        "timestamp": datetime.now(timezone.utc)
+    })
+    logger.info(f"Citizen login: {email}")
+    return jsonify({"status": "ok", "token": token, "user_id": user_id, "name": name})
+
+@app.route("/api/citizen/logout", methods=["POST"])
+@citizen_required
+@handle_errors
+def citizen_logout():
+    user = users_col.find_one({"_id": ObjectId(request.citizen_id)}, {"email": 1, "profile": 1})
+    email = (user or {}).get("email", "")
+    name = ((user or {}).get("profile") or {}).get("basic", {}).get("name", "")
+    citizen_logs_col.insert_one({
+        "user_id": request.citizen_id,
+        "email": email,
+        "name": name,
+        "event": "logout",
+        "ip": request.remote_addr,
+        "timestamp": datetime.now(timezone.utc)
+    })
+    return jsonify({"status": "ok", "message": "Logged out."})
+
+@app.route("/api/citizen/profile", methods=["GET"])
+@citizen_required
+@handle_errors
+def citizen_profile():
+    user = users_col.find_one({"_id": ObjectId(request.citizen_id)}, {"password": 0})
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    user["_id"] = str(user["_id"])
+    if isinstance(user.get("created"), datetime):
+        user["created"] = user["created"].isoformat() + "Z"
+    return jsonify(user)
+
+@app.route("/api/citizen/profile", methods=["PUT"])
+@citizen_required
+@handle_errors
+def citizen_update_profile():
+    data = request.json or {}
+    updates = {}
+    if data.get("name"): updates["profile.basic.name"] = data["name"]
+    if data.get("phone"): updates["profile.basic.phone"] = data["phone"]
+    if data.get("age"): updates["profile.basic.age"] = data["age"]
+    if data.get("job"): updates["extended_profile.employment.job"] = data["job"]
+    if data.get("education"): updates["extended_profile.employment.education"] = data["education"]
+    if updates:
+        updates["updated"] = datetime.now(timezone.utc)
+        users_col.update_one({"_id": ObjectId(request.citizen_id)}, {"$set": updates})
+    return jsonify({"status": "ok", "message": "Profile updated."})
+
+@app.route("/api/dashboard/analytics", methods=["GET"])
 @admin_required
-def admin_export_csv():
-    try:
-        records = list(engagement_col.find({}))
-        
-        si = io.StringIO()
-        writer = csv.writer(si)
-        
-        writer.writerow(["user_id", "age", "job", "desires", "question_clicked", "service", "ad", "timestamp"])
-        
-        for r in records:
-            user_id = r.get("user_id", "")
-            age = r.get("age", "")
-            job = r.get("job", "")
+@handle_errors
+def get_dashboard_analytics():
+    # User Metrics
+    total_users = users_col.count_documents({})
+    # Engagement Metrics
+    total_engagements = eng_col.count_documents({})
+    # Store Metrics
+    total_orders = orders_col.count_documents({})
+    
+    # Recent Engagements
+    recent_engagements = list(eng_col.find().sort("timestamp", -1).limit(10))
+    # Serialize ObjectIds and Datetimes
+    for eng in recent_engagements:
+        eng["_id"] = str(eng["_id"])
+        if isinstance(eng.get("timestamp"), datetime):
+            eng["timestamp"] = eng["timestamp"].isoformat() + "Z"
             
-            raw_desires = r.get("desires", "")
-            if isinstance(raw_desires, list):
-                desires = ", ".join(str(d) for d in raw_desires)
-            else:
-                desires = str(raw_desires)
-                
-            question_clicked = r.get("question_clicked") or r.get("question") or ""
-            service = r.get("service", "")
-            ad = r.get("ad", "")
-            
-            ts = r.get("timestamp")
-            if isinstance(ts, datetime):
-                timestamp_str = ts.isoformat()
-            elif ts:
-                timestamp_str = str(ts)
-            else:
-                timestamp_str = ""
-                
-            writer.writerow([user_id, age, job, desires, question_clicked, service, ad, timestamp_str])
-        
-        output = si.getvalue()
-        
-        from flask import Response
-        return Response(
-            output,
-            mimetype="text/csv",
-            headers={"Content-disposition": "attachment; filename=engagements.csv"}
-        )
-    except Exception as e:
-        app.logger.error(f"Error in admin_export_csv: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        if eng.get("user_id"):
+            try:
+                user = users_col.find_one({"_id": ObjectId(eng["user_id"])})
+            except:
+                user = users_col.find_one({"_id": eng["user_id"]})
+            if user:
+                eng["user_name"] = user.get("profile", {}).get("basic", {}).get("name") or user.get("email")
+                eng["user_email"] = user.get("email")
 
+    # Recent Users
+    recent_users = list(users_col.find({"sample_data": {"$ne": True}}, {"password": 0}).sort("created", -1).limit(5))
+    print(f"DEBUG: Found {len(recent_users)} recent users")
+    for u in recent_users:
+        u["_id"] = str(u["_id"])
+        # Handle cases where created might be missing or string
+        created = u.get("created")
+        if isinstance(created, datetime):
+            u["created"] = created.isoformat() + "Z"
+        elif not created:
+             u["created"] = datetime.now(timezone.utc).isoformat() + "Z"
 
-# 8. Public API Routes
-@app.route('/api/services', methods=['GET'])
+    # Citizen login stats
+    total_logins = citizen_logs_col.count_documents({"event": "login"})
+    total_registered = citizen_logs_col.count_documents({"event": "register"})
+    total_login_failed = citizen_logs_col.count_documents({"event": "login_failed"})
+
+    # Recent access logs
+    recent_access_logs = list(citizen_logs_col.find().sort("timestamp", -1).limit(20))
+    for log in recent_access_logs:
+        log["_id"] = str(log["_id"])
+        if isinstance(log.get("timestamp"), datetime):
+            log["timestamp"] = log["timestamp"].isoformat() + "Z"
+
+    return jsonify({
+        "user_metrics": {
+            "total_users": total_users,
+            "total_registered": total_registered,
+            "active_now": 0
+        },
+        "engagement_metrics": {
+            "total_engagements": total_engagements
+        },
+        "store_metrics": {
+            "total_orders": total_orders
+        },
+        "citizen_access_metrics": {
+            "total_logins": total_logins,
+            "total_registered": total_registered,
+            "total_login_failed": total_login_failed,
+        },
+        "recent_engagements": recent_engagements,
+        "recent_users": recent_users,
+        "recent_access_logs": recent_access_logs,
+    })
+
+# ---------------- Public API Routes ----------------
+@app.route("/api/categories", methods=["GET"])
+@handle_errors
+def get_categories():
+    cats = list(categories_col.find({}, {"_id": 0}))
+    # Deduplicate by id
+    seen = set()
+    unique_cats = []
+    for c in cats:
+        cid = c.get('id')
+        if cid and cid not in seen:
+            seen.add(cid)
+            unique_cats.append(c)
+    return jsonify(unique_cats)
+
+@app.route("/api/services", methods=["GET"])
+@handle_errors
 def get_services():
     return jsonify(list(services_col.find({}, {"_id": 0})))
 
-@app.route('/api/engagement', methods=['POST'])
-def save_engagement():
-    data = request.json
-    engagement_col.insert_one(data)
-    return jsonify({"message": "Success"}), 201
+@app.route("/api/service/<service_id>", methods=["GET"])
+@handle_errors
+def get_service(service_id):
+    service = services_col.find_one({"id": service_id}, {"_id": 0})
+    if not service:
+        return jsonify({"error": "Service not found"}), 404
+    return jsonify(service)
 
-# AI Chat Removed
+@app.route("/api/admin/ads/seed", methods=["POST"])
+def seed_ads():
+    new_ads = [
+        # Student Ads
+        {"id": "ad_al_university", "title": "University Admissions for A/L Students", "content": "Applications for the upcoming university intake are now open for all A/L students. Apply online.", "target_segments": ["al", "student", "education"], "active": True, "link": "https://ugc.ac.lk/"},
+        {"id": "ad_student_laptop", "title": "Government Laptop Subsidy", "content": "Special subsidized laptop scheme for university and vocational students. Check eligibility.", "target_segments": ["student", "education", "university"], "active": True, "link": "https://mohe.gov.lk/"},
+        {"id": "ad_student_scholarship", "title": "Mahapola Scholarship Applications", "content": "The Mahapola Higher Education Scholarship applications are now open for the new academic year.", "target_segments": ["student", "university", "scholarship"], "active": True, "link": "https://mahapola.lk/"},
+        
+        # Business Ads
+        {"id": "ad_business_tax", "title": "SME Tax Exemptions", "content": "Small and Medium Enterprises can now apply for the new digital tax exemption scheme.", "target_segments": ["business", "sme", "entrepreneur"], "active": True, "link": "http://www.ird.gov.lk/"},
+        {"id": "ad_business_export", "title": "Export Development Grants", "content": "The EDB is offering special grants to local SMEs aiming to export Sri Lankan products.", "target_segments": ["business", "export", "sme"], "active": True, "link": "https://www.srilankabusiness.com/"},
+        {"id": "ad_business_registration", "title": "Digital Business Registration", "content": "Register your new company completely online within 24 hours via the e-ROC portal.", "target_segments": ["business", "entrepreneur", "startup"], "active": True, "link": "https://eroc.drc.gov.lk/"},
+        
+        # Doctor Ads
+        {"id": "ad_doctor_health", "title": "Advanced Medical Equipment Grants", "content": "Special government grants are available for medical professionals and clinics to upgrade their equipment.", "target_segments": ["doctor", "health", "medical"], "active": True, "link": "https://www.health.gov.lk/"},
+        {"id": "ad_doctor_training", "title": "Overseas Fellowship Program", "content": "Applications open for the Ministry of Health overseas fellowship for senior medical officers.", "target_segments": ["doctor", "medical", "hospital"], "active": True, "link": "https://www.health.gov.lk/"},
+        {"id": "ad_doctor_pgim", "title": "PGIM New Course Intake", "content": "The Postgraduate Institute of Medicine has published the schedule for upcoming MD selection exams.", "target_segments": ["doctor", "medical", "health"], "active": True, "link": "https://pgim.cmb.ac.lk/"},
+        
+        # Farmer Ads
+        {"id": "ad_farmer_subsidy", "title": "Agricultural Fertilizer Subsidy", "content": "The government has released the new batch of fertilizer subsidies. Register your lands today.", "target_segments": ["farmer", "agriculture"], "active": True, "link": "https://www.agrimin.gov.lk/"},
+        {"id": "ad_farmer_insurance", "title": "Free Crop Insurance Scheme", "content": "Register for the free government crop insurance for the upcoming Maha cultivation season.", "target_segments": ["farmer", "agriculture", "cultivation"], "active": True, "link": "https://www.agrimin.gov.lk/"},
+        {"id": "ad_farmer_equipment", "title": "Subsidized Tractors for Farmers", "content": "Registered farmer societies can now apply for 50% subsidized agricultural machinery.", "target_segments": ["farmer", "agriculture"], "active": True, "link": "https://www.doa.gov.lk/"},
+        
+        # Teacher Ads
+        {"id": "ad_teacher_training", "title": "National Teacher Training Program", "content": "Enroll in the upcoming national teacher training workshops for digital classroom tools.", "target_segments": ["teacher", "education", "school"], "active": True, "link": "https://moe.gov.lk/"},
+        {"id": "ad_teacher_transfer", "title": "Annual Teacher Transfers", "content": "The National Teacher Transfer Board is now accepting applications for the next academic year.", "target_segments": ["teacher", "school", "education"], "active": True, "link": "https://moe.gov.lk/"},
+        {"id": "ad_teacher_pgde", "title": "PGDE Intake 2026", "content": "Applications for the Postgraduate Diploma in Education (PGDE) are now available online.", "target_segments": ["teacher", "education"], "active": True, "link": "https://nie.lk/"},
+        
+        # Engineer Ads
+        {"id": "ad_engineer_projects", "title": "Public Works Tenders Opened", "content": "The Ministry of Engineering Services has opened new tenders for infrastructure development.", "target_segments": ["engineer", "construction", "infrastructure"], "active": True, "link": "https://www.treasury.gov.lk/"},
+        {"id": "ad_engineer_renewable", "title": "Renewable Energy Project Grants", "content": "The Sustainable Energy Authority is providing grants for innovative solar and wind projects.", "target_segments": ["engineer", "energy", "infrastructure"], "active": True, "link": "https://www.energy.gov.lk/"},
+        {"id": "ad_engineer_certification", "title": "Chartered Engineer Workshop", "content": "IESL is hosting a mandatory workshop for associate engineers seeking chartered status.", "target_segments": ["engineer", "professional", "construction"], "active": True, "link": "https://iesl.lk/"},
+        
+        # General / Other Ads
+        {"id": "ad_general_update", "title": "Citizen Digital ID Rollout", "content": "The new digital citizen ID card applications are now open for everyone. Update your profile.", "target_segments": ["other", "all_citizens"], "active": True, "link": "https://drp.gov.lk/"},
+        {"id": "ad_general_passport", "title": "New E-Passport Services", "content": "Apply for the biometric e-passport online and get it delivered to your home within 3 days.", "target_segments": ["other", "all_citizens"], "active": True, "link": "https://www.immigration.gov.lk/"},
+        {"id": "ad_general_election", "title": "Voter Registration Verification", "content": "Verify your name in the upcoming electoral register through the online portal.", "target_segments": ["other", "all_citizens"], "active": True, "link": "https://elections.gov.lk/"}
+    ]
+    for ad in new_ads:
+        ads_col.update_one({"id": ad["id"]}, {"$set": ad}, upsert=True)
+    return jsonify({"status": "seeded"})
 
-@app.route('/api/ai/search', methods=['POST'])
+@app.route("/api/ads", methods=["GET"])
+@handle_errors
+def get_ads():
+    ads = list(ads_col.find({}, {"_id": 0}))
+    
+    user_id = request.args.get("user_id")
+    if user_id:
+        try:
+            user = users_col.find_one({"_id": ObjectId(user_id)})
+        except:
+            user = users_col.find_one({"_id": user_id})
+            
+        if user:
+            # Build user profile string
+            keywords = []
+            ext_prof = user.get("extended_profile", {})
+            job = ext_prof.get("employment", {}).get("job", "")
+            education = ext_prof.get("employment", {}).get("education", "")
+            user_type = ext_prof.get("user_type", "")
+            interests = ext_prof.get("interests", "")
+            if job: keywords.extend(job.lower().split())
+            if education: keywords.extend(education.lower().split())
+            if user_type: keywords.extend(user_type.lower().split())
+            if interests: keywords.extend(interests.lower().replace(",", " ").split())
+            
+            basic_prof = user.get("profile", {}).get("basic", {})
+            age = basic_prof.get("age", "")
+            if age: keywords.append(str(age))
+            
+            user_text = " ".join([job, education, interests] + keywords).strip()
+            
+            if user_text:
+                # Rule-Based Matching Algorithm
+                job_lower = job.lower().strip() if job else ""
+                user_type_lower = user_type.lower().strip() if user_type else ""
+                user_text_lower = user_text.lower()
+                
+                for a in ads:
+                    a["relevance_score"] = 0
+                    segments = a.get("target_segments", [])
+                    
+                    # Exact job or user type match (e.g., student -> student ads, doctor -> doctor ads)
+                    if (job_lower and job_lower in segments) or (user_type_lower and user_type_lower in segments):
+                        a["relevance_score"] += 200
+                    # Partial keyword match from profile
+                    elif any(seg in user_text_lower for seg in segments):
+                        a["relevance_score"] += 100
+
+                # AI Fallback: Enhance scores using Embeddings if AI is available
+                if AI_AVAILABLE:
+                    try:
+                        user_emb = get_embeddings([user_text])
+                        
+                        if user_emb is not None:
+                            ad_texts = []
+                            for a in ads:
+                                a_text = f"{a.get('title', '')} {a.get('content', '')} {' '.join(a.get('target_segments', []))}"
+                                ad_texts.append(a_text)
+                                
+                            ad_embs = get_embeddings(ad_texts)
+                            if ad_embs is not None:
+                                sims = cosine_sim(user_emb, ad_embs)[0]
+                                
+                                for i, a in enumerate(ads):
+                                    # Add AI similarity score (0 to 100) to the rule-based score
+                                    a["relevance_score"] += float(sims[i]) * 100
+                                    
+                    except Exception as e:
+                        logger.error(f"Error in ad recommendation: {e}")
+                        
+                # Filter out ads that have NO relevance if user is logged in
+                # to ensure they don't see common ads for all users.
+                ads = [a for a in ads if a.get("relevance_score", 0) > 10]
+                
+                # Sort ads based on final relevance score
+                ads.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+                    
+    return jsonify(ads)
+
+@app.route("/api/store/products", methods=["GET"])
+@handle_errors
+def get_products():
+    query = {}
+    
+    # Filter by categories (handle comma-separated list from frontend)
+    category_param = request.args.get("category")
+    if category_param:
+        cats = [c.strip() for c in category_param.split(",") if c.strip()]
+        if len(cats) > 1:
+            query["category"] = {"$in": cats}
+        elif len(cats) == 1:
+            query["category"] = cats[0]
+
+    # Filter by search term
+    search = request.args.get("search")
+    if search:
+        query["name"] = {"$regex": search, "$options": "i"}
+
+    products = list(products_col.find(query, {"_id": 0}))
+    
+    user_id = request.args.get("user_id")
+    # Only perform advanced recommendation if user is provided AND no specific filters are applied
+    # This prevents the N+1 slowness on the store page when fetching counts
+    is_filtered = bool(category_param or search or request.args.get("min_price") or request.args.get("max_price"))
+    
+    if user_id and not is_filtered and AI_AVAILABLE and products:
+        try:
+            keywords = []
+            
+            # 1. From Engagements
+            user_engs = list(eng_col.find({"user_id": user_id}))
+            if user_engs:
+                for eng in user_engs:
+                    if eng.get("query"): keywords.extend(eng["query"].lower().split())
+                    if eng.get("service"): keywords.append(eng["service"].lower())
+                    if eng.get("question_clicked"): keywords.extend(eng["question_clicked"].lower().split())
+                    if eng.get("desires"): keywords.extend([d.lower() for d in eng["desires"]])
+                    
+            # 2. From User Profile
+            try:
+                user = users_col.find_one({"_id": ObjectId(user_id)})
+            except:
+                user = users_col.find_one({"_id": user_id})
+                
+            if user:
+                # Extended profile
+                ext_prof = user.get("extended_profile", {})
+                job = ext_prof.get("employment", {}).get("job", "")
+                education = ext_prof.get("employment", {}).get("education", "")
+                interests = ext_prof.get("interests", "")
+                if job: keywords.extend(job.lower().split())
+                if education: keywords.extend(education.lower().split())
+                if interests: keywords.extend(interests.lower().replace(",", " ").split())
+                
+                # Basic profile
+                basic_prof = user.get("profile", {}).get("basic", {})
+                age = basic_prof.get("age", "")
+                if age: keywords.append(str(age))
+                
+                keywords = [kw for kw in keywords if len(kw) > 3]
+                
+                # Advanced Recommendation Engine using NLP Embeddings
+                user_text = " ".join([job, education, interests] + keywords).strip()
+                
+                if user_text:
+                    try:
+                        # Using Gemini API for embeddings
+                        user_emb = get_embeddings([user_text])
+                        
+                        if user_emb is not None:
+                            prod_texts = []
+                            for p in products:
+                                p_text = f"{p.get('name', '')} {p.get('description', '')} {p.get('category', '')} {' '.join(p.get('tags', []))} {' '.join(p.get('target_segments', []))}"
+                                prod_texts.append(p_text)
+                                
+                            prod_embs = get_embeddings(prod_texts)
+                            if prod_embs is not None:
+                                # Using custom cosine_sim
+                                sims = cosine_sim(user_emb, prod_embs)[0]
+                                
+                                for i, p in enumerate(products):
+                                    p["recommendation_score"] = float(sims[i]) * 100
+                                    
+                                products.sort(key=lambda x: x.get("recommendation_score", 0), reverse=True)
+                    except Exception as e:
+                        logger.error(f"Error in advanced recommendation algorithm: {e}")
+        except Exception as e:
+            logger.error(f"Recommendation engine error: {e}")
+                
+    return jsonify(products)
+
+@app.route("/api/store/categories", methods=["GET"])
+@handle_errors
+def get_store_categories():
+    # Get unique categories from products collection
+    try:
+        categories = products_col.distinct("category")
+        return jsonify({"categories": categories if categories else []})
+    except Exception as e:
+        logger.warning(f"Error fetching store categories: {e}")
+        return jsonify({"categories": []})
+
+@app.route("/api/store/order", methods=["POST"])
+@citizen_required
+@handle_errors
+def create_order():
+    data = request.json or {}
+    if not data.get("items"):
+        return jsonify({"error": "No items in order"}), 400
+
+    order = {
+        "order_id": f"ORD-{int(datetime.now(timezone.utc).timestamp())}",
+        "user_id": data.get("user_id"),
+        "items": data.get("items"),
+        "amount": data.get("total", 0),
+        "customer": data.get("customer", {}),
+        "status": "pending",
+        "created": datetime.now(timezone.utc)
+    }
+    orders_col.insert_one(order)
+    return jsonify({"status": "ok", "message": "Order placed successfully", "order_id": order["order_id"]})
+
+# ---------------- Search & AI ----------------
+@app.route("/api/search/autosuggest", methods=["GET"])
+@handle_errors
+def autosuggest():
+    q = request.args.get("q", "").lower()
+    if not q or len(q) < 2:
+        return jsonify([])
+    escaped_q = re.escape(q)
+    results = []
+    services = services_col.find({
+        "$or": [
+            {"name.en": {"$regex": escaped_q, "$options": "i"}},
+            {"subservices.name.en": {"$regex": escaped_q, "$options": "i"}}
+        ]
+    }).limit(5)
+    for s in services:
+        s_name = s.get("name", {}).get("en", "")
+        if q in s_name.lower():
+            results.append({"id": s.get("id"), "name": s_name, "type": "service"})
+        for sub in s.get("subservices", []):
+            sub_name = sub.get("name", {}).get("en", "")
+            if q in sub_name.lower():
+                results.append({"id": s.get("id"), "sub_id": sub.get("id"), "name": sub_name, "type": "subservice"})
+    return jsonify(results[:5])
+
+@app.route("/api/admin/build_index", methods=["POST"])
+@admin_required
+@handle_errors
+def build_index():
+    if os.getenv("VERCEL"):
+        return jsonify({"error": "Indexing is disabled on Vercel's read-only filesystem. Please build locally and commit the data/ directory."}), 400
+    count = rebuild_search_index()
+    return jsonify({"status": "ok", "count": count, "faiss": FAISS_AVAILABLE})
+
+def rebuild_search_index():
+    # No local model needed
+    docs = []
+    services = list(services_col.find())
+    for s in services:
+        s_name = s.get("name", {}).get("en", "")
+        for sub in s.get("subservices", []):
+            sub_name = sub.get("name", {}).get("en", "")
+            for q in sub.get("questions", []):
+                q_text = q.get("q", {}).get("en", "")
+                ans_text = q.get("answer", {}).get("en", "")
+                text = f"{s_name} {sub_name} {q_text} {ans_text}"
+                docs.append({"text": text, "metadata": {"service_id": s.get("id"), "sub_id": sub.get("id"), "question": q_text, "answer": ans_text}})
+    
+    # Handle empty data gracefully
+    if not docs:
+        logger.warning("No services data found to index. Skipping embedding generation.")
+        # Create empty index files
+        with open(META_PATH, "w") as f:
+            json.dump([], f)
+        np.save("data/embeddings.npy", np.array([], dtype='float32'))
+        return 0
+    
+    texts = [d["text"] for d in docs]
+    embeddings = get_embeddings(texts)
+    if embeddings is None:
+        logger.warning("Failed to generate embeddings. Creating empty index.")
+        with open(META_PATH, "w") as f:
+            json.dump([], f)
+        np.save("data/embeddings.npy", np.array([], dtype='float32'))
+        return 0
+    
+    with open(META_PATH, "w") as f:
+        json.dump(docs, f)
+    
+    np.save("data/embeddings.npy", embeddings)
+    return len(docs)
+
+@app.route("/api/ai/search", methods=["POST"])
+@citizen_required
+@handle_errors
 def ai_search():
     data = request.json or {}
-    query = data.get('query')
+    query = data.get("query", "")
+    top_k = data.get("top_k", 3)
     if not query:
-        return jsonify({"error": "Query is required"}), 400
+        return jsonify({"error": "Query required"}), 400
 
-    top_k = int(data.get('top_k', 5))
-    try:
-        hits = search_vectors(query, top_k=top_k)
-        chunks = []
-        source_metadata = []
-        for hit in hits:
-            meta = hit["metadata"]
-            chunk = meta.get("content", "")
-            if chunk:
-                chunks.append(chunk)
-            source_metadata.append(meta)
-
-        answer_str = "\n\n---\n\n".join(chunks)
-        return jsonify({
-            "query": query,
-            "answer": answer_str,
-            "source_metadata": source_metadata
-        }), 200
-    except Exception as e:
-        app.logger.error(f"Error in ai_search: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-# AI Chat Implementation
-@app.route('/api/ai/chat', methods=['POST'])
-def ai_chat():
-    data = request.json or {}
-    prompt = data.get('prompt')
-    if not prompt:
-        return jsonify({"error": "Prompt is required"}), 400
-        
-    try:
-        genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
-        
-        # Use gemini-flash-latest as a stable alias
-        model_name = 'gemini-flash-latest'
-        
-        # Retry logic for 429 errors
-        import time
-        for attempt in range(2):
-            try:
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    system_instruction="You are the official Sri Lanka Citizen Assistant. Answer questions based on the provided ministry data. Be polite and concise. Always prefer the data provided in your training if it matches Sri Lankan government services."
-                )
-                response = model.generate_content(prompt)
-                return jsonify({"response": response.text.strip()})
-            except Exception as e:
-                if "429" in str(e) and attempt == 0:
-                    time.sleep(2) # Wait and retry once
-                    continue
-                logging.warning(f"AI Attempt {attempt+1} failed: {str(e)}")
-                return local_ai_fallback(prompt)
-
-    except Exception as e:
-        logging.error(f"AI CHAT CRITICAL ERROR: {str(e)}")
-        return local_ai_fallback(prompt)
-
-def local_ai_fallback(prompt):
-    """Fallback logic when Gemini API is unavailable"""
-    prompt_lower = prompt.lower()
-    all_services = list(services_col.find({}))
-    
-    # 1. Smarter Keyword Search
-    best_match = None
-    max_matches = 0
-    
-    keywords = prompt_lower.split()
-    for m in all_services:
-        matches = 0
-        m_name = m['name']['en'].lower()
-        if any(word in m_name for word in keywords if len(word) > 3):
-            matches += 2
+    # ── Primary path: vector-similarity search (needs built index) ──
+    if os.path.exists(META_PATH):
+        try:
+            with open(META_PATH, "r") as f:
+                docs = json.load(f)
             
-        for s in m.get('subservices', []):
-            s_name = s['name']['en'].lower()
-            if any(word in s_name for word in keywords if len(word) > 3):
-                matches += 1
+            # Handle empty index gracefully
+            if not docs:
+                logger.info("Search index is empty, falling back to keyword search")
+                raise ValueError("Empty search index")
+            
+            q_embed = get_embeddings([query])
+            if q_embed is None:
+                raise ValueError("AI Search unavailable")
                 
-            for q in s.get('questions', []):
-                q_text = q['q']['en'].lower()
-                if any(word in q_text for word in keywords if len(word) > 4):
-                    return jsonify({"response": f"[Instant Answer] {q['answer']['en']} (Source: {m['name']['en']})"})
+            hits = []
+            if os.path.exists("data/embeddings.npy"):
+                embeddings = np.load("data/embeddings.npy")
+                
+                # Handle empty embeddings
+                if embeddings.size == 0:
+                    logger.info("Embeddings are empty, falling back to keyword search")
+                    raise ValueError("Empty embeddings")
+                
+                # Check for dimension mismatch (e.g., switching from 384 to 768)
+                if q_embed.shape[-1] == embeddings.shape[-1]:
+                    # Calculate similarities
+                    sims = cosine_sim(q_embed, embeddings)[0]
+                    top_indices = sims.argsort()[-top_k:][::-1]
+                    for idx in top_indices:
+                        hits.append(docs[idx]["metadata"])
+                else:
+                    logger.warning(f"Embedding dimension mismatch: {q_embed.shape[-1]} vs {embeddings.shape[-1]}. Rebuild index.")
+            if hits:
+                best = hits[0]
+                return jsonify({
+                    "answer": best.get("answer", ""),
+                    "downloads": best.get("downloads", []),
+                    "location": best.get("location", ""),
+                    "instructions": best.get("instructions", ""),
+                })
+        except Exception as e:
+            logger.warning(f"Vector search failed, falling back to keyword search: {e}")
 
-        if matches > max_matches:
-            max_matches = matches
-            best_match = m
+    # ── Fallback path: keyword search directly in MongoDB ──
+    keywords = [w for w in re.split(r'\s+', query.strip()) if len(w) >= 2]
+    if not keywords:
+        return jsonify({"answer": "Please provide more details in your question.", "sources": []})
 
-    if best_match:
-        return jsonify({
-            "response": f"I've found information related to {best_match['name']['en']}. You can contact them at {best_match['contact']['phone']} or visit {best_match['links'][0]['url']} for official services."
+    # Build a regex that matches any keyword
+    pattern = '|'.join(re.escape(k) for k in keywords)
+    mongo_filter = {
+        "$or": [
+            {"subservices.questions.q.en": {"$regex": pattern, "$options": "i"}},
+            {"subservices.questions.answer.en": {"$regex": pattern, "$options": "i"}},
+            {"subservices.name.en": {"$regex": pattern, "$options": "i"}},
+            {"name.en": {"$regex": pattern, "$options": "i"}},
+        ]
+    }
+    services_cursor = services_col.find(mongo_filter).limit(5)
+
+    hits = []
+    for svc in services_cursor:
+        svc_name = (svc.get("name") or {}).get("en", "")
+        for sub in svc.get("subservices", []):
+            sub_name = (sub.get("name") or {}).get("en", "")
+            for q in sub.get("questions", []):
+                q_text = (q.get("q") or {}).get("en", "")
+                ans_text = (q.get("answer") or {}).get("en", "")
+                combined = f"{svc_name} {sub_name} {q_text} {ans_text}".lower()
+                score = sum(1 for k in keywords if k.lower() in combined)
+                if score > 0:
+                    hits.append({
+                        "score": score,
+                        "question": q_text,
+                        "answer": ans_text,
+                        "service_id": svc.get("id", ""),
+                        "title": f"{svc_name} – {sub_name}",
+                        "downloads": q.get("downloads", []),
+                        "location": q.get("location", ""),
+                        "instructions": q.get("instructions", ""),
+                    })
+
+    if not hits:
+        # ── Last Resort: LLM General Knowledge Fallback ──
+        if AI_AVAILABLE:
+            try:
+                model = genai.GenerativeModel('gemini-1.5-flash')
+                prompt = f"""
+                You are the Sri Lankan Citizen Portal AI Assistant.
+                The user asked: "{query}"
+                
+                I could not find a specific answer in the official government database.
+                Provide a general, helpful, and polite response based on your general knowledge of Sri Lankan government processes.
+                
+                IMPORTANT:
+                - Start with: "I couldn't find a specific official document for this in my database, but here is some general information:"
+                - Keep it concise.
+                - Advise the user to verify with the relevant ministry (e.g. Ministry of Health, DRP, etc.) if they need official confirmation.
+                - If the question is completely irrelevant to government services, politely say you can only assist with citizen portal and government service related questions.
+                """
+                response = model.generate_content(prompt)
+                ai_answer = response.text
+                
+                # Log this for admin review
+                unanswered_questions_col.insert_one({
+                    "query": query,
+                    "timestamp": datetime.now(timezone.utc),
+                    "user_id": request.headers.get("X-Citizen-Id"),
+                    "ai_fallback_provided": True
+                })
+                
+                return jsonify({
+                    "answer": ai_answer,
+                    "downloads": [], "location": "", "instructions": "", "is_ai_fallback": True
+                })
+            except Exception as e:
+                logger.error(f"Gemini fallback failed: {e}")
+
+        # Final fallback if even Gemini fails or is unavailable
+        unanswered_questions_col.insert_one({
+            "query": query,
+            "timestamp": datetime.now(timezone.utc),
+            "user_id": request.headers.get("X-Citizen-Id"),
+            "ai_fallback_provided": False
         })
-            
+        return jsonify({
+            "answer": "I couldn't find specific information about your question in the portal database. I have recorded your question for our team to improve our service. Please try rephrasing or visit a regional government office.",
+            "downloads": [], "location": "", "instructions": ""
+        })
+
+    hits.sort(key=lambda x: x["score"], reverse=True)
+    best = hits[0]
     return jsonify({
-        "response": "I'm currently receiving many requests. While my AI is cooling down, please use keywords like 'passport', 'license', 'health', or 'tax' so I can find local answers for you!"
+        "answer": best["answer"] or "Please visit the relevant government office for more details.",
+        "downloads": best.get("downloads", []),
+        "location": best.get("location", ""),
+        "instructions": best.get("instructions", ""),
     })
 
-if __name__ == '__main__':
-    # Startup check for default admin
-    if admins_col.count_documents({}) == 0:
-        admin_user = "admin"
-        admin_pwd = os.getenv('ADMIN_PWD', 'admin123')
-        hashed = bcrypt.hashpw(admin_pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        admins_col.update_one(
-            {"username": admin_user},
-            {"$set": {"password": hashed, "role": "superadmin"}},
-            upsert=True
-        )
-        print("Default administrator account generated via startup check.")
+# ---------------- Recommendation Engine ----------------
+class RecommendationEngine:
+    def __init__(self, db):
+        self.db = db
+        self.users_col = db["users"]
+        self.eng_col = db["engagements"]
+        self.ads_col = db["ads"]
 
-    port = int(os.getenv('PORT', 3000))
-    # Disable reloader on Windows to prevent [WinError 10038]
-    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
+    def get_user_segment(self, user_id):
+        try:
+            user = self.users_col.find_one({"_id": ObjectId(user_id)})
+        except Exception:
+            user = self.users_col.find_one({"_id": user_id})
+        if not user:
+            return ["unknown"]
+        profile = user.get('extended_profile', {})
+        segments = []
+        # Age, education, children, career-based segments
+        try:
+            age = int(profile.get('family', {}).get('age') or 0)
+        except Exception:
+            age = None
+        education = profile.get('education', {}).get('highest_qualification', 'unknown')
+        children = profile.get('family', {}).get('children', [])
+        job = profile.get('career', {}).get('current_job', '').lower()
+        if age is not None:
+            if age < 25: segments.append("young_adult")
+            elif age <= 35: segments.append("early_career")
+            elif age <= 45: segments.append("mid_career_family")
+            elif age <= 60: segments.append("established_professional")
+            else: segments.append("senior")
+        if education in ['none', 'school', 'ol']: segments.append("needs_qualification")
+        elif education in ['al', 'diploma']: segments.append("mid_education")
+        elif education in ['degree', 'masters', 'phd']: segments.append("highly_educated")
+        if children: segments.append("parent")
+        if 'government' in job: segments.append("government_employee")
+        if any(w in job for w in ['manager', 'director', 'head']): segments.append("management")
+        return list(set(segments))
+
+    def get_personalized_ads(self, user_id, limit=5):
+        segments = self.get_user_segment(user_id)
+        user_engs = list(self.eng_col.find({"user_id": user_id}))
+        interests = []
+        for eng in user_engs:
+            interests.extend(eng.get('desires', []))
+            if eng.get('question_clicked'): interests.append(eng['question_clicked'])
+            if eng.get('service'): interests.append(eng['service'])
+        ads = list(self.ads_col.find({"active": True}))
+        scored = []
+        for ad in ads:
+            score = len(set(segments) & set(ad.get('target_segments', []))) * 10
+            score += len(set(interests) & set(ad.get('tags', []))) * 5
+            created = ad.get('created')
+            if created:
+                days_old = (datetime.now(timezone.utc) - created).days
+                score += 5 if days_old < 7 else 2 if days_old < 30 else 0
+            scored.append((ad, score))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [ad for ad, _ in scored[:limit]]
+
+    def generate_education_recommendations(self, user_id):
+        try:
+            user = self.users_col.find_one({"_id": ObjectId(user_id)})
+        except Exception:
+            user = self.users_col.find_one({"_id": user_id})
+        if not user: return []
+        profile = user.get('extended_profile', {})
+        recs = []
+        # Children education recommendations
+        children_ages = profile.get('family', {}).get('children_ages', [])
+        children_education = profile.get('family', {}).get('children_education', [])
+        for i, c_age in enumerate(children_ages):
+            child_edu = (children_education[i] if i < len(children_education) else "") or ""
+            child_edu_l = child_edu.lower()
+            if 14 <= c_age <= 16 and 'ol' not in child_edu_l:
+                recs.append({"type": "child_education", "title": "O/L Exam Preparation Support", "message": "Special tuition for O/L exams", "priority": "medium", "tags": ["ol_exams"]})
+            if 17 <= c_age <= 20 and 'al' not in child_edu_l:
+                recs.append({"type": "child_education", "title": "A/L Stream Guidance", "message": "Expert guidance for A/L selection", "priority": "medium", "tags": ["al_exams"]})
+        return recs
+
+recommendation_engine = RecommendationEngine(db)
+
+@app.route("/api/recommendations/<user_id>", methods=["GET"])
+@citizen_required
+@handle_errors
+def get_recommendations(user_id):
+    return jsonify({
+        "ads": recommendation_engine.get_personalized_ads(user_id),
+        "education_recommendations": recommendation_engine.generate_education_recommendations(user_id),
+        "user_segment": recommendation_engine.get_user_segment(user_id)
+    })
+
+# ---------------- GDPR / Consent ----------------
+@app.route("/api/consent/update", methods=["POST"])
+@citizen_required
+@handle_errors
+def update_consent():
+    payload = request.json or {}
+    user_id = payload.get("user_id")
+    if not user_id: return jsonify({"error": "user_id required"}), 400
+    updates = {
+        "extended_profile.consent.marketing_emails": payload.get("marketing_emails", False),
+        "extended_profile.consent.personalized_ads": payload.get("personalized_ads", False),
+        "extended_profile.consent.data_analytics": payload.get("data_analytics", False),
+        "extended_profile.consent.updated": datetime.now(timezone.utc)
+    }
+    users_col.update_one({"_id": ObjectId(user_id)}, {"$set": updates})
+    return jsonify({"status": "ok", "message": "Consent updated"})
+
+@app.route("/api/data/export/<user_id>", methods=["GET"])
+@citizen_required
+@handle_errors
+def export_user_data(user_id):
+    try: user = users_col.find_one({"_id": ObjectId(user_id)})
+    except Exception: user = users_col.find_one({"_id": user_id})
+    if not user: return jsonify({"error": "User not found"}), 404
+    export_data = {"profile": user.get("profile", {}), "extended_profile": user.get("extended_profile", {}), "consent_preferences": user.get("extended_profile", {}).get("consent", {})}
+    return jsonify(export_data)
+
+@app.route("/api/data/delete/<user_id>", methods=["DELETE"])
+@citizen_required
+@handle_errors
+def delete_user_data(user_id):
+    try: res = users_col.delete_one({"_id": ObjectId(user_id)})
+    except Exception: res = users_col.delete_one({"_id": user_id})
+    try: eng_col.update_many({"user_id": user_id}, {"$set": {"user_id": None, "anonymized": True}})
+    except Exception: pass
+    try: 
+        orders_col.update_many({"user_id": user_id}, {"$set": {"user_id": None, "anonymized": True}})
+        payments_col.update_many({"user_id": user_id}, {"$set": {"user_id": None, "anonymized": True}})
+    except Exception: pass
+    if getattr(res, "deleted_count", 0) > 0:
+        return jsonify({"status": "ok", "message": "User data deleted/anonymized"})
+    else:
+        return jsonify({"error": "User not found"}), 404
+
+# ---------------- Features: Engagement, Profile, Payment ----------------
+
+@app.route("/api/engagement", methods=["POST"])
+@app.route("/api/engagement/enhanced", methods=["POST"])
+@citizen_required
+@handle_errors
+def log_engagement():
+    data = request.json or {}
+    data["timestamp"] = datetime.now(timezone.utc)
+    
+    user_id = data.get("user_id") or getattr(request, "citizen_id", None)
+    if user_id:
+        data["user_id"] = user_id
+        try:
+            user = users_col.find_one({"_id": ObjectId(user_id)})
+        except:
+            user = users_col.find_one({"_id": user_id})
+            
+        if user:
+            data["user_name"] = user.get("profile", {}).get("basic", {}).get("name") or user.get("email")
+            data["user_email"] = user.get("email")
+            data["user_details"] = user.get("extended_profile", {})
+        else:
+            data["anonymous"] = True
+    else:
+        data["user_id"] = None
+        data["anonymous"] = True
+    
+    eng_col.insert_one(data)
+    return jsonify({"status": "ok", "message": "Engagement logged"})
+
+@app.route("/api/profile/step", methods=["POST"])
+@citizen_required
+@handle_errors
+def profile_step():
+    data = request.json or {}
+    step = data.get("step")
+    profile_data = data.get("data", {})
+    email = data.get("email")
+    profile_id = data.get("profile_id")
+    
+    if not step:
+        return jsonify({"error": "Step required"}), 400
+
+    if step == "basic":
+        if not email:
+            return jsonify({"error": "Email required for basic profile"}), 400
+        
+        # Check if user exists
+        existing = users_col.find_one({"email": email})
+        if existing:
+            # Update existing
+            user_id = existing["_id"]
+            users_col.update_one({"_id": user_id}, {"$set": {"profile.basic": profile_data, "updated": datetime.now(timezone.utc)}})
+        else:
+            # Create new
+            res = users_col.insert_one({
+                "email": email,
+                "profile": {"basic": profile_data},
+                "created": datetime.now(timezone.utc),
+                "sample_data": False
+            })
+            user_id = res.inserted_id
+            print(f"DEBUG: Inserted new user {user_id} with email {email}")
+            
+        return jsonify({"status": "ok", "profile_id": str(user_id), "step": "basic"})
+
+    elif step in ["contact", "employment", "family_interests"]:
+        if not profile_id:
+            return jsonify({"error": "Profile ID required"}), 400
+        
+        try:
+            oid = ObjectId(profile_id)
+        except:
+            return jsonify({"error": "Invalid Profile ID"}), 400
+            
+        users_col.update_one({"_id": oid}, {"$set": {f"extended_profile.{step}": profile_data, "updated": datetime.now(timezone.utc)}})
+        return jsonify({"status": "ok", "step": step})
+
+    return jsonify({"error": "Invalid step"}), 400
+
+
+@app.route("/api/store/payment", methods=["POST"])
+@citizen_required
+@handle_errors
+def process_payment():
+    data = request.json or {}
+    order_id = data.get("order_id")
+    amount = data.get("amount")
+    
+    if not order_id:
+        return jsonify({"error": "Order ID required"}), 400
+        
+    # Simulate payment processing
+    payment_record = {
+        "order_id": order_id,
+        "amount": amount,
+        "user_id": data.get("user_id"),
+        "method": data.get("method", "card"),
+        "status": "completed",
+        "transaction_id": data.get("transaction_id", f"TXN-{int(datetime.now(timezone.utc).timestamp())}"),
+        "timestamp": datetime.now(timezone.utc)
+    }
+    
+    payments_col.insert_one(payment_record)
+    
+    # Update order status
+    orders_col.update_one({"order_id": order_id}, {"$set": {"status": "paid", "payment_id": payment_record["transaction_id"]}})
+    
+    return jsonify({"status": "ok", "message": "Payment successful", "transaction_id": payment_record["transaction_id"]})
+
+# ---------------- Init default admin ----------------
+def init_admin_user():
+    if admins_col.count_documents({}) == 0:
+        pwd = os.getenv("ADMIN_PWD", "admin123")
+        hashed = bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt())
+        admins_col.insert_one({"username": "admin", "email": os.getenv("ADMIN_EMAIL", "admin@example.com"), "password": hashed, "created": datetime.now(timezone.utc)})
+        logger.info("Default admin created")
+    # Ensure indexes
+    try:
+        citizen_logs_col.create_index([("timestamp", -1)])
+        citizen_logs_col.create_index("event")
+        citizen_logs_col.create_index("user_id")
+        users_col.create_index([("email", 1)], unique=False, sparse=True)
+    except Exception:
+        pass
+
+# ---------------- Run App ----------------
+if __name__ == "__main__":
+    init_admin_user()
+    port = int(os.getenv("PORT", 5000))
+    host = os.getenv("HOST", "0.0.0.0")
+    debug = os.getenv("DEBUG", "True") == "True"
+    logger.info(f"Starting server at {host}:{port}")
+    app.run(debug=debug, host=host, port=port)
